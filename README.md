@@ -21,7 +21,7 @@ languages.
 
 ```bash
 sudo apt-get install -y build-essential cmake ninja-build \
-    libssl-dev libfreerdp3-dev libwinpr3-dev
+    libssl-dev freerdp3-dev libwinpr3-dev
 
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build

@@ -26,8 +26,7 @@ jobs:
           sudo apt-get install -y \
             build-essential cmake ninja-build pkg-config \
             libssl-dev \
-            libfreerdp3-dev libwinpr3-dev \
-            libfreerdp-client3-dev
+            freerdp3-dev libwinpr3-dev
 
       - name: Configure (Release)
         run: |
