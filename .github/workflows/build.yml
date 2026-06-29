@@ -13,7 +13,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-linux:
     name: Linux (GCC)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
 
@@ -131,7 +131,7 @@ jobs:
     name: Publish Release
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [ build-linux, build-windows ]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
 
