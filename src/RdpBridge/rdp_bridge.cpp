@@ -34,6 +34,9 @@ extern "C" {
 namespace
 {
 
+// Bytes per pixel for the BGRA32 pixel format used by this SDK.
+static constexpr int BGRA32_BYTES_PER_PIXEL = 4;
+
 // ---------------------------------------------------------------------------
 // Internal session state
 // ---------------------------------------------------------------------------
@@ -489,7 +492,7 @@ BOOL rdp_end_paint(rdpContext* context)
 
     const int width  = static_cast<int>(gdi->width);
     const int height = static_cast<int>(gdi->height);
-    const int stride = width * 4;
+    const int stride = width * BGRA32_BYTES_PER_PIXEL;
     const auto* pixels = static_cast<const uint8_t*>(gdi->primary_buffer);
     if (!pixels)
         return TRUE;

@@ -17,6 +17,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <time.h>
+#endif
+
 #include "rdp_bridge.h"
 
 /* -------------------------------------------------------------------------
