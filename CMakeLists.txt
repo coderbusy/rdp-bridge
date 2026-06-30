@@ -22,18 +22,14 @@ option(FREERDP_STATIC "Link FreeRDP/WinPR/OpenSSL statically into RdpBridge" ${F
 find_package(FreeRDP REQUIRED CONFIG)
 find_package(WinPR REQUIRED CONFIG)
 find_package(OpenSSL REQUIRED)
+# cjson is a FreeRDP dependency that vcpkg doesn't propagate transitively
+find_package(cJSON QUIET CONFIG)
+if(NOT cJSON_FOUND)
+    find_library(CJSON_LIB NAMES cjson)
+endif()
 
 find_path(FREERDP_INCLUDE_DIR NAMES freerdp/freerdp.h PATH_SUFFIXES freerdp3)
 find_path(WINPR_INCLUDE_DIR   NAMES winpr/stream.h   PATH_SUFFIXES winpr3)
-
-# Select static vs shared FreeRDP/WinPR link targets.
-if(FREERDP_STATIC)
-    set(FREERDP_LINK_TARGET freerdp-static)
-    set(WINPR_LINK_TARGET   winpr-static)
-else()
-    set(FREERDP_LINK_TARGET freerdp)
-    set(WINPR_LINK_TARGET   winpr)
-endif()
 
 # ---------------------------------------------------------------------------
 # RdpBridge shared library
@@ -52,29 +48,29 @@ target_include_directories(RdpBridge
         ${WINPR_INCLUDE_DIR}
 )
 
-if(WIN32 AND FREERDP_STATIC)
-    # On Windows with a *-static vcpkg triplet the import libs are already
-    # static archives; no whole-archive wrapping is needed.
-    target_link_libraries(RdpBridge PRIVATE
-        ${FREERDP_LINK_TARGET}
-        ${WINPR_LINK_TARGET}
-        OpenSSL::Crypto
-    )
-elseif(UNIX AND NOT APPLE AND FREERDP_STATIC)
-    # Pull all symbols from static archives into the shared library.
+# On Linux, wrap static archives so all symbols are pulled into the .so.
+# On Windows (vcpkg static triplet) and for shared linking, plain linking suffices.
+if(UNIX AND NOT APPLE AND FREERDP_STATIC)
     target_link_libraries(RdpBridge PRIVATE
         -Wl,--whole-archive
-        ${FREERDP_LINK_TARGET}
-        ${WINPR_LINK_TARGET}
+        freerdp
+        winpr
         OpenSSL::Crypto
         -Wl,--no-whole-archive
     )
 else()
     target_link_libraries(RdpBridge PRIVATE
-        ${FREERDP_LINK_TARGET}
-        ${WINPR_LINK_TARGET}
+        freerdp
+        winpr
         OpenSSL::Crypto
     )
+endif()
+
+# Link cjson if vcpkg exposes it as a separate target (not propagated by FreeRDP)
+if(TARGET cjson)
+    target_link_libraries(RdpBridge PRIVATE cjson)
+elseif(CJSON_LIB)
+    target_link_libraries(RdpBridge PRIVATE "${CJSON_LIB}")
 endif()
 
 target_compile_definitions(RdpBridge PRIVATE RDP_BRIDGE_EXPORTS)
