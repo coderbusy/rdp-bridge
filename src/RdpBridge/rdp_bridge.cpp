@@ -852,13 +852,14 @@ BOOL rdp_post_connect(freerdp* instance)
                 instance->context->channels, CLIPRDR_SVC_CHANNEL_NAME));
         if (cliprdr)
         {
-            session->cliprdr                    = cliprdr;
             cliprdr->custom                     = session;
             cliprdr->ServerCapabilities         = cliprdr_server_capabilities;
             cliprdr->ServerFormatList           = cliprdr_server_format_list;
             cliprdr->ServerFormatListResponse   = cliprdr_server_format_list_response;
             cliprdr->ServerFormatDataRequest    = cliprdr_server_format_data_request;
             cliprdr->ServerFormatDataResponse   = cliprdr_server_format_data_response;
+            std::lock_guard<std::mutex> lock(session->callback_mutex);
+            session->cliprdr = cliprdr;
         }
     }
 
@@ -876,7 +877,10 @@ void rdp_post_disconnect(freerdp* instance)
 
     if (session)
     {
-        session->cliprdr = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(session->callback_mutex);
+            session->cliprdr = nullptr;
+        }
         const bool wasConnected = session->connected.exchange(false);
         notify_status(session, "RDP disconnected.");
         notify_state(session, RdpBridge_State_Disconnected);
@@ -1158,7 +1162,10 @@ RDP_BRIDGE_API void RdpBridge_disconnect(void* handle)
     if (session->instance)
         freerdp_abort_connect(session->instance);
 
-    if (session->worker.joinable())
+    // Guard against self-join: a callback fired from connection_thread must not
+    // call Disconnect() synchronously (it would join the calling thread).
+    if (session->worker.joinable() &&
+        session->worker.get_id() != std::this_thread::get_id())
         session->worker.join();
 
 #if defined(_WIN32)
@@ -1278,14 +1285,16 @@ RDP_BRIDGE_API int RdpBridge_clipboard_set_text(
     if (!session || !session->connected)
         return -1;
 
+    CliprdrClientContext* cliprdr = nullptr;
     {
         std::lock_guard<std::mutex> lock(session->callback_mutex);
         session->pending_local_text = utf8_text ? utf8_text : "";
+        cliprdr = session->cliprdr;
     }
 
-    if (session->cliprdr)
+    if (cliprdr)
     {
-        cliprdr_announce_formats(session->cliprdr);
+        cliprdr_announce_formats(cliprdr);
         return 0;
     }
 
