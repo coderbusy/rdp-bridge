@@ -16,6 +16,16 @@ public partial class MainWindowViewModel : ObservableObject, IRdpFrameReceiver, 
     private RdpBridgeClient? _client;
     private bool _started;
 
+    // Injected by the View after AttachedToVisualTree; used for clipboard access.
+    private Func<Task<string?>>? _getLocalClipboard;
+    private Func<string, Task>?  _setLocalClipboard;
+
+    // Last text pushed to / received from local clipboard — used to break feedback loops.
+    private string? _lastLocalClipboard;
+    private string? _lastRemoteClipboard;
+
+    private DispatcherTimer? _clipboardPollTimer;
+
     [ObservableProperty] private string _host = "192.168.1.1";
     [ObservableProperty] private string _port = "3389";
     [ObservableProperty] private string _username = string.Empty;
@@ -33,6 +43,15 @@ public partial class MainWindowViewModel : ObservableObject, IRdpFrameReceiver, 
     public string ScaleModeText => IsFitToWindow ? "Fit" : "1:1";
 
     partial void OnIsFitToWindowChanged(bool value) => OnPropertyChanged(nameof(ScaleModeText));
+
+    /// <summary>
+    /// Called by the View once it has a TopLevel reference.
+    /// </summary>
+    public void SetClipboardAccessors(Func<Task<string?>> get, Func<string, Task> set)
+    {
+        _getLocalClipboard = get;
+        _setLocalClipboard = set;
+    }
 
     [RelayCommand]
     private void Connect()
@@ -52,9 +71,14 @@ public partial class MainWindowViewModel : ObservableObject, IRdpFrameReceiver, 
         _client.StateChanged   += state => Dispatcher.UIThread.Post(() =>
         {
             IsConnected = state == RdpState.Connected;
-            if (state is RdpState.Disconnected or RdpState.Failed)
+            if (state == RdpState.Connected)
+            {
+                StartClipboardSync();
+            }
+            else if (state is RdpState.Disconnected or RdpState.Failed)
             {
                 _started = false;
+                StopClipboardSync();
                 StatusText = state == RdpState.Failed ? "Connection failed" : "Disconnected";
             }
         });
@@ -62,8 +86,10 @@ public partial class MainWindowViewModel : ObservableObject, IRdpFrameReceiver, 
         {
             _started    = false;
             IsConnected = false;
+            StopClipboardSync();
             StatusText  = "Disconnected";
         });
+        _client.ClipboardReceived += text => Dispatcher.UIThread.Post(() => OnRemoteClipboardReceived(text));
 
         _ = Task.Run(() =>
         {
@@ -96,6 +122,7 @@ public partial class MainWindowViewModel : ObservableObject, IRdpFrameReceiver, 
         _client?.Disconnect();
         _started    = false;
         IsConnected = false;
+        StopClipboardSync();
         StatusText  = "Disconnected";
     }
 
@@ -111,6 +138,66 @@ public partial class MainWindowViewModel : ObservableObject, IRdpFrameReceiver, 
     {
         if (IsConnected) _client?.SendKey(scancode, down);
     }
+
+    // ── Clipboard sync ────────────────────────────────────────────────────────
+
+    private void StartClipboardSync()
+    {
+        if (_clipboardPollTimer != null) return;
+        _lastLocalClipboard  = null;
+        _lastRemoteClipboard = null;
+
+        _clipboardPollTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(500),
+            DispatcherPriority.Background, OnClipboardPollTick);
+        _clipboardPollTimer.Start();
+    }
+
+    private void StopClipboardSync()
+    {
+        _clipboardPollTimer?.Stop();
+        _clipboardPollTimer = null;
+    }
+
+    private async void OnClipboardPollTick(object? sender, EventArgs e)
+    {
+        if (_getLocalClipboard == null || _client == null || !IsConnected) return;
+
+        try
+        {
+            var text = await _getLocalClipboard();
+            if (text == null || text == _lastLocalClipboard) return;
+            _lastLocalClipboard = text;
+
+            // Don't echo back text that arrived from the remote side.
+            if (text == _lastRemoteClipboard) return;
+
+            _client.SetClipboardText(text);
+        }
+        catch
+        {
+            // Clipboard access can throw; never crash the session.
+        }
+    }
+
+    private async void OnRemoteClipboardReceived(string text)
+    {
+        if (string.IsNullOrEmpty(text) || _setLocalClipboard == null) return;
+        if (text == _lastRemoteClipboard) return;
+
+        _lastRemoteClipboard = text;
+        _lastLocalClipboard  = text; // suppress the next poll round-trip
+
+        try
+        {
+            await _setLocalClipboard(text);
+        }
+        catch
+        {
+            // Clipboard access can throw; never crash the session.
+        }
+    }
+
+    // ── Frame delivery ────────────────────────────────────────────────────────
 
     unsafe void IRdpFrameReceiver.OnFrame(int width, int height, int stride, ReadOnlySpan<byte> pixels)
     {
@@ -130,15 +217,17 @@ public partial class MainWindowViewModel : ObservableObject, IRdpFrameReceiver, 
             var src = copy.AsSpan(0, Math.Min(copy.Length, dst.Length));
             src.CopyTo(dst);
 
-            Framebuffer    = bmp;
-            RemoteWidth    = width;
-            RemoteHeight   = height;
+            Framebuffer  = bmp;
+            RemoteWidth  = width;
+            RemoteHeight = height;
         });
     }
 
     public void Dispose()
     {
+        StopClipboardSync();
         _client?.Dispose();
         _client = null;
     }
 }
+
