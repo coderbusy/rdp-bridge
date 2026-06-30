@@ -56,8 +56,8 @@ public sealed class RdpBridgeClient : IDisposable
         }
 
         NativeMethods.RdpBridge_set_callbacks(_handle, _frameCallback, _statusCallback, _disconnectCallback, IntPtr.Zero);
-        NativeMethods.RdpBridge_set_state_callback(_handle, _stateCallback);
-        NativeMethods.RdpBridge_set_clipboard_callback(_handle, _clipboardCallback);
+        NativeMethods.RdpBridge_set_state_callback(_handle, _stateCallback, IntPtr.Zero);
+        NativeMethods.RdpBridge_set_clipboard_callback(_handle, _clipboardCallback, IntPtr.Zero);
 
         if (options != null)
         {
@@ -357,10 +357,10 @@ public sealed class RdpBridgeClient : IDisposable
             [MarshalAs(UnmanagedType.LPUTF8Str)] string localPath);
 
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern void RdpBridge_set_state_callback(IntPtr handle, StateCallback stateCallback);
+        public static extern void RdpBridge_set_state_callback(IntPtr handle, StateCallback stateCallback, IntPtr userData);
 
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern void RdpBridge_set_clipboard_callback(IntPtr handle, ClipboardCallback clipboardCallback);
+        public static extern void RdpBridge_set_clipboard_callback(IntPtr handle, ClipboardCallback clipboardCallback, IntPtr userData);
 
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int RdpBridge_clipboard_set_text(

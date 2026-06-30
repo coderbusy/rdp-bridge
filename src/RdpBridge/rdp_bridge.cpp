@@ -77,6 +77,8 @@ struct RdpSession
     RdpBridge_StateCallback state_callback = nullptr;
     RdpBridge_ClipboardCallback clipboard_callback = nullptr;
     void* user_data = nullptr;
+    void* state_user_data = nullptr;
+    void* clipboard_user_data = nullptr;
 
     CliprdrClientContext* cliprdr = nullptr;
     std::string pending_local_text;
@@ -230,7 +232,7 @@ void notify_state(RdpSession* session, RdpBridge_State state)
 
     std::lock_guard<std::mutex> lock(session->callback_mutex);
     if (session->state_callback)
-        session->state_callback(session->user_data, state);
+        session->state_callback(session->state_user_data, state);
 }
 
 std::string get_library_directory()
@@ -735,7 +737,7 @@ static UINT cliprdr_server_format_data_response(
     {
         std::lock_guard<std::mutex> lock(session->callback_mutex);
         if (session->clipboard_callback)
-            session->clipboard_callback(session->user_data, utf8.c_str());
+            session->clipboard_callback(session->clipboard_user_data, utf8.c_str());
     }
 
     return CHANNEL_RC_OK;
@@ -800,17 +802,12 @@ BOOL rdp_pre_connect(freerdp* instance)
             instance->context->settings, FreeRDP_DeviceRedirection, TRUE);
         for (const auto& d : session->drives)
         {
-            auto* drive = static_cast<RDPDR_DRIVE*>(
-                std::calloc(1, sizeof(RDPDR_DRIVE)));
-            if (!drive)
+            const char* args[] = { d.name.c_str(), d.path.c_str() };
+            auto* device = freerdp_device_new(RDPDR_DTYP_FILESYSTEM, 2, args);
+            if (!device)
                 continue;
-            drive->device.Type = RDPDR_DTYP_FILESYSTEM;
-            drive->device.Name = _strdup(d.name.c_str());
-            drive->Path        = _strdup(d.path.c_str());
-            drive->automount   = FALSE;
-            freerdp_device_collection_add(
-                instance->context->settings,
-                reinterpret_cast<RDPDR_DEVICE*>(drive));
+            if (!freerdp_device_collection_add(instance->context->settings, device))
+                freerdp_device_free(device);
         }
     }
 
@@ -1257,24 +1254,28 @@ RDP_BRIDGE_API void RdpBridge_add_drive(
 
 RDP_BRIDGE_API void RdpBridge_set_state_callback(
     void* handle,
-    RdpBridge_StateCallback state_callback)
+    RdpBridge_StateCallback state_callback,
+    void* user_data)
 {
     auto* session = static_cast<RdpSession*>(handle);
     if (!session)
         return;
     std::lock_guard<std::mutex> lock(session->callback_mutex);
-    session->state_callback = state_callback;
+    session->state_callback  = state_callback;
+    session->state_user_data = user_data;
 }
 
 RDP_BRIDGE_API void RdpBridge_set_clipboard_callback(
     void* handle,
-    RdpBridge_ClipboardCallback clipboard_callback)
+    RdpBridge_ClipboardCallback clipboard_callback,
+    void* user_data)
 {
     auto* session = static_cast<RdpSession*>(handle);
     if (!session)
         return;
     std::lock_guard<std::mutex> lock(session->callback_mutex);
-    session->clipboard_callback = clipboard_callback;
+    session->clipboard_callback  = clipboard_callback;
+    session->clipboard_user_data = user_data;
 }
 
 RDP_BRIDGE_API int RdpBridge_clipboard_set_text(

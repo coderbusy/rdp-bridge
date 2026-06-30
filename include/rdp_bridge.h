@@ -221,10 +221,12 @@ RDP_BRIDGE_API void RdpBridge_add_drive(
  *
  * @param handle         Session handle.
  * @param state_callback Called on every state transition.  NULL = unregister.
+ * @param user_data      Passed unchanged to every state_callback invocation.
  */
 RDP_BRIDGE_API void RdpBridge_set_state_callback(
     void* handle,
-    RdpBridge_StateCallback state_callback);
+    RdpBridge_StateCallback state_callback,
+    void* user_data);
 
 /**
  * Register a callback that receives remote clipboard text.
@@ -234,10 +236,12 @@ RDP_BRIDGE_API void RdpBridge_set_state_callback(
  * @param handle             Session handle.
  * @param clipboard_callback Called when the remote clipboard changes.
  *                           NULL = unregister.
+ * @param user_data          Passed unchanged to every clipboard_callback invocation.
  */
 RDP_BRIDGE_API void RdpBridge_set_clipboard_callback(
     void* handle,
-    RdpBridge_ClipboardCallback clipboard_callback);
+    RdpBridge_ClipboardCallback clipboard_callback,
+    void* user_data);
 
 /**
  * Push local text to the remote clipboard.
