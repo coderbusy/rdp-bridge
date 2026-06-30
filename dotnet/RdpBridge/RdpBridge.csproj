@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+
+    <IsPackable>true</IsPackable>
+    <PackageId>CoderBusy.RdpBridge</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>CoderBusy</Authors>
+    <Description>C# wrapper for RdpBridge — a native RDP client library built on FreeRDP.</Description>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/coderbusy/rdp-bridge</RepositoryUrl>
+    <PackageTags>rdp;freerdp;remote-desktop</PackageTags>
+  </PropertyGroup>
+
+  <!--
+    Native DLLs are placed into runtimes/<rid>/native/ by the CI pack job.
+    When present locally (for testing), they are also picked up here.
+  -->
+  <ItemGroup>
+    <None Include="runtimes\**" Pack="true" PackagePath="runtimes\" Condition="Exists('runtimes')" />
+  </ItemGroup>
+
+</Project>
