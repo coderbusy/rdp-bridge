@@ -54,7 +54,8 @@ var options = new RdpConnectOptions
     Experience  = RdpExperienceFlags.LowBandwidth,
 };
 
-using var client = new RdpBridgeClient();
+var frameReceiver = new SmokeFrameReceiver(frameReceived);
+using var client = new RdpBridgeClient(frameReceiver);
 
 client.StateChanged += state =>
 {
@@ -62,12 +63,6 @@ client.StateChanged += state =>
     Console.WriteLine($"[smoke] state → {state}");
     if (state == RdpState.Failed)
         frameReceived.TrySetResult(false);
-};
-
-client.FramebufferUpdated += (_, e) =>
-{
-    Console.WriteLine($"[smoke] frame {e.Width}x{e.Height} stride={e.Stride} bytes={e.Pixels.Length}");
-    frameReceived.TrySetResult(true);
 };
 
 client.StatusChanged += msg =>
@@ -132,3 +127,12 @@ await Task.Delay(2000);
 client.Disconnect();
 Console.WriteLine("[smoke] PASS");
 return 0;
+
+file sealed class SmokeFrameReceiver(TaskCompletionSource<bool> tcs) : IRdpFrameReceiver
+{
+    public void OnFrame(int width, int height, int stride, ReadOnlySpan<byte> pixels)
+    {
+        Console.WriteLine($"[smoke] frame {width}x{height} stride={stride} bytes={pixels.Length}");
+        tcs.TrySetResult(true);
+    }
+}

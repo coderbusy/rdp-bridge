@@ -8,6 +8,7 @@ public sealed class RdpBridgeClient : IDisposable
 {
     private const string LibraryName = "RdpBridgeNative";
     private static readonly object DebugLogLock = new();
+    private readonly IRdpFrameReceiver? _frameReceiver;
     private readonly FrameCallback _frameCallback;
     private readonly StatusCallback _statusCallback;
     private readonly DisconnectCallback _disconnectCallback;
@@ -20,7 +21,6 @@ public sealed class RdpBridgeClient : IDisposable
         NativeLibrary.SetDllImportResolver(typeof(RdpBridgeClient).Assembly, ResolveNativeLibrary);
     }
 
-    public event EventHandler<RdpFramebufferEventArgs>? FramebufferUpdated;
     public event Action<string>? StatusChanged;
     public event Action? Disconnected;
     public event Action<RdpState>? StateChanged;
@@ -28,8 +28,9 @@ public sealed class RdpBridgeClient : IDisposable
 
     public static string DebugLogPath => Path.Combine(GetDebugLogDirectory(), "rdp-debug.log");
 
-    public RdpBridgeClient()
+    public RdpBridgeClient(IRdpFrameReceiver? frameReceiver = null)
     {
+        _frameReceiver      = frameReceiver;
         _frameCallback      = OnFrame;
         _statusCallback     = OnStatus;
         _disconnectCallback = OnDisconnected;
@@ -216,15 +217,11 @@ public sealed class RdpBridgeClient : IDisposable
         return $"linux-{arch}";
     }
 
-    private void OnFrame(IntPtr userData, int width, int height, int stride, IntPtr data)
+    private unsafe void OnFrame(IntPtr userData, int width, int height, int stride, IntPtr data)
     {
-        if (width <= 0 || height <= 0 || stride <= 0 || data == IntPtr.Zero)
-            return;
-
-        var length = checked(stride * height);
-        var pixels = new byte[length];
-        Marshal.Copy(data, pixels, 0, length);
-        FramebufferUpdated?.Invoke(this, new RdpFramebufferEventArgs(width, height, stride, pixels));
+        if (data == IntPtr.Zero || width <= 0 || height <= 0 || stride <= 0) return;
+        var span = new ReadOnlySpan<byte>((void*)data, stride * height);
+        _frameReceiver?.OnFrame(width, height, stride, span);
     }
 
     private void OnStatus(IntPtr userData, IntPtr message)
