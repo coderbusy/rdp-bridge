@@ -84,6 +84,10 @@ Full API reference: [`include/rdp_bridge.h`](include/rdp_bridge.h)
 
 ## License
 
+Copyright 2024 CoderBusy
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full text.
+
 This project is derived from
-[CxShell/CxRdpBridge](https://github.com/xiaochengzjc/CxShell/tree/master/native/CxRdpBridge).
-See [LICENSE](LICENSE) for details.
+[CxShell/CxRdpBridge](https://github.com/xiaochengzjc/CxShell/tree/master/native/CxRdpBridge)
+and builds on [FreeRDP](https://github.com/FreeRDP/FreeRDP) (Apache-2.0).
