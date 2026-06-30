@@ -10,6 +10,12 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # ---------------------------------------------------------------------------
 option(RDPBRIDGE_BUILD_EXAMPLES "Build usage examples" ON)
 
+# Auto-enable static linking when a *-static vcpkg triplet is active.
+if(VCPKG_TARGET_TRIPLET MATCHES "-static$")
+    set(FREERDP_STATIC ON)
+endif()
+option(FREERDP_STATIC "Link FreeRDP/WinPR/OpenSSL statically into RdpBridge" ${FREERDP_STATIC})
+
 # ---------------------------------------------------------------------------
 # Dependencies
 # ---------------------------------------------------------------------------
@@ -18,6 +24,15 @@ find_package(WinPR REQUIRED CONFIG)
 find_package(OpenSSL REQUIRED)
 
 find_path(FREERDP_INCLUDE_DIR NAMES freerdp/freerdp.h PATH_SUFFIXES freerdp3)
+
+# Select static vs shared FreeRDP/WinPR link targets.
+if(FREERDP_STATIC)
+    set(FREERDP_LINK_TARGET freerdp-static)
+    set(WINPR_LINK_TARGET   winpr-static)
+else()
+    set(FREERDP_LINK_TARGET freerdp)
+    set(WINPR_LINK_TARGET   winpr)
+endif()
 
 # ---------------------------------------------------------------------------
 # RdpBridge shared library
@@ -35,12 +50,22 @@ target_include_directories(RdpBridge
         ${FREERDP_INCLUDE_DIR}
 )
 
-target_link_libraries(RdpBridge
-    PRIVATE
-        freerdp
-        winpr
+if(UNIX AND NOT APPLE AND FREERDP_STATIC)
+    # Pull all symbols from static archives into the shared library.
+    target_link_libraries(RdpBridge PRIVATE
+        -Wl,--whole-archive
+        ${FREERDP_LINK_TARGET}
+        ${WINPR_LINK_TARGET}
         OpenSSL::Crypto
-)
+        -Wl,--no-whole-archive
+    )
+else()
+    target_link_libraries(RdpBridge PRIVATE
+        ${FREERDP_LINK_TARGET}
+        ${WINPR_LINK_TARGET}
+        OpenSSL::Crypto
+    )
+endif()
 
 target_compile_definitions(RdpBridge PRIVATE RDP_BRIDGE_EXPORTS)
 

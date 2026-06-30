@@ -9,7 +9,7 @@ on:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Linux build
+  # Linux build (static)
   # ---------------------------------------------------------------------------
   build-linux:
     name: Linux (GCC)
@@ -28,11 +28,12 @@ jobs:
             libssl-dev \
             freerdp3-dev libwinpr3-dev
 
-      - name: Configure (Release)
+      - name: Configure (Release, static)
         run: |
           cmake -S . -B build \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
+            -DFREERDP_STATIC=ON \
             -DRDPBRIDGE_BUILD_EXAMPLES=ON
 
       - name: Build
@@ -58,18 +59,34 @@ jobs:
           path: RdpBridge-linux-x64.tar.gz
 
   # ---------------------------------------------------------------------------
-  # Windows build
+  # Windows builds (static, x64 / x86 / arm64)
   # ---------------------------------------------------------------------------
   build-windows:
-    name: Windows (MSVC)
+    name: Windows (${{ matrix.arch }})
     runs-on: windows-2022
     permissions:
       contents: read
 
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            triplet: x64-windows-static
+            cmake_arch: x64
+            artifact: RdpBridge-windows-x64
+          - arch: x86
+            triplet: x86-windows-static
+            cmake_arch: Win32
+            artifact: RdpBridge-windows-x86
+          - arch: arm64
+            triplet: arm64-windows-static
+            cmake_arch: ARM64
+            artifact: RdpBridge-windows-arm64
+
     steps:
       - uses: actions/checkout@v4
 
-      # Install FreeRDP via vcpkg (bundled on the runner)
       - name: Set up vcpkg
         run: |
           git clone --depth=1 https://github.com/microsoft/vcpkg "${{ github.workspace }}/vcpkg"
@@ -78,15 +95,16 @@ jobs:
 
       - name: Install FreeRDP via vcpkg
         run: |
-          "${{ github.workspace }}/vcpkg/vcpkg.exe" install freerdp:x64-windows openssl:x64-windows
+          "${{ github.workspace }}/vcpkg/vcpkg.exe" install freerdp:${{ matrix.triplet }} openssl:${{ matrix.triplet }}
         shell: cmd
 
-      - name: Configure (Release)
+      - name: Configure (Release, static)
         run: |
           cmake -S . -B build `
-            -G "Visual Studio 17 2022" -A x64 `
+            -G "Visual Studio 17 2022" -A ${{ matrix.cmake_arch }} `
             -DCMAKE_BUILD_TYPE=Release `
             -DRDPBRIDGE_BUILD_EXAMPLES=ON `
+            -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} `
             -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake"
         shell: pwsh
 
@@ -106,7 +124,7 @@ jobs:
       # -----------------------------------------------------------------------
       # Package the SDK: header + DLL + import library
       # -----------------------------------------------------------------------
-      - name: Package SDK (Windows)
+      - name: Package SDK (Windows ${{ matrix.arch }})
         run: |
           New-Item -ItemType Directory -Force sdk-windows/include | Out-Null
           New-Item -ItemType Directory -Force sdk-windows/lib     | Out-Null
@@ -114,14 +132,14 @@ jobs:
           Copy-Item include/rdp_bridge.h            sdk-windows/include/
           Copy-Item build/Release/RdpBridge.dll     sdk-windows/bin/
           Copy-Item build/Release/RdpBridge.lib     sdk-windows/lib/ -ErrorAction SilentlyContinue
-          Compress-Archive -Path sdk-windows/* -DestinationPath RdpBridge-windows-x64.zip
+          Compress-Archive -Path sdk-windows/* -DestinationPath ${{ matrix.artifact }}.zip
         shell: pwsh
 
-      - name: Upload artifact (Windows)
+      - name: Upload artifact (Windows ${{ matrix.arch }})
         uses: actions/upload-artifact@v4
         with:
-          name: RdpBridge-windows-x64
-          path: RdpBridge-windows-x64.zip
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.zip
 
   # ---------------------------------------------------------------------------
   # GitHub Release (tag pushes only)
@@ -140,10 +158,20 @@ jobs:
         with:
           name: RdpBridge-linux-x64
 
-      - name: Download Windows artifact
+      - name: Download Windows x64 artifact
         uses: actions/download-artifact@v4
         with:
           name: RdpBridge-windows-x64
+
+      - name: Download Windows x86 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: RdpBridge-windows-x86
+
+      - name: Download Windows arm64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: RdpBridge-windows-arm64
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -151,4 +179,6 @@ jobs:
           files: |
             RdpBridge-linux-x64.tar.gz
             RdpBridge-windows-x64.zip
+            RdpBridge-windows-x86.zip
+            RdpBridge-windows-arm64.zip
           generate_release_notes: true
