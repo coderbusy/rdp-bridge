@@ -52,7 +52,15 @@ target_include_directories(RdpBridge
         ${WINPR_INCLUDE_DIR}
 )
 
-if(UNIX AND NOT APPLE AND FREERDP_STATIC)
+if(WIN32 AND FREERDP_STATIC)
+    # On Windows with a *-static vcpkg triplet the import libs are already
+    # static archives; no whole-archive wrapping is needed.
+    target_link_libraries(RdpBridge PRIVATE
+        ${FREERDP_LINK_TARGET}
+        ${WINPR_LINK_TARGET}
+        OpenSSL::Crypto
+    )
+elseif(UNIX AND NOT APPLE AND FREERDP_STATIC)
     # Pull all symbols from static archives into the shared library.
     target_link_libraries(RdpBridge PRIVATE
         -Wl,--whole-archive
