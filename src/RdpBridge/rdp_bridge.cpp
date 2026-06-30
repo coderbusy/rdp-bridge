@@ -1059,9 +1059,9 @@ void connection_thread(RdpSession* session)
     while (session->running)
     {
         HANDLE handles[64];
-        DWORD  count = 0;
-        if (freerdp_get_event_handles(session->instance->context,
-                                      handles, ARRAYSIZE(handles), &count) != TRUE)
+        DWORD  count = freerdp_get_event_handles(session->instance->context,
+                                                  handles, ARRAYSIZE(handles));
+        if (count == 0)
         {
             set_error(session, "freerdp_get_event_handles failed.");
             break;

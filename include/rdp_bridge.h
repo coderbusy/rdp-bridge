@@ -283,7 +283,8 @@ RDP_BRIDGE_API int RdpBridge_start_local_clipboard_monitor(
  */
 RDP_BRIDGE_API void RdpBridge_stop_local_clipboard_monitor(void* handle);
 
-
+/**
+ * Push local text to the remote clipboard.
  * Safe to call from any thread while the session is connected.
  *
  * @param handle     Session handle.
