@@ -244,7 +244,46 @@ RDP_BRIDGE_API void RdpBridge_set_clipboard_callback(
     void* user_data);
 
 /**
- * Push local text to the remote clipboard.
+ * Local clipboard monitor callback: called when the local clipboard text changes.
+ * Fired from a background thread on Windows (hidden HWND message loop).
+ * Not fired on platforms where monitoring is not implemented.
+ *
+ * @param user_data  Opaque pointer supplied via RdpBridge_start_local_clipboard_monitor.
+ * @param utf8_text  Null-terminated UTF-8 string with the new clipboard text.
+ *                   Valid only during the callback.
+ */
+typedef void (*RdpBridge_LocalClipboardCallback)(void* user_data, const char* utf8_text);
+
+/**
+ * Start monitoring the local clipboard for text changes.
+ * On Windows: registers AddClipboardFormatListener on a hidden HWND_MESSAGE
+ * window and fires callback on every WM_CLIPBOARDUPDATE that carries text.
+ * On other platforms: no-op, returns 0, callback is never invoked.
+ *
+ * Only one monitor is active per handle at a time; calling again replaces
+ * the previous registration.  Call RdpBridge_stop_local_clipboard_monitor
+ * to stop.
+ *
+ * @param handle    Session handle (used only for lifetime association).
+ * @param callback  Called on clipboard change.  NULL stops monitoring.
+ * @param user_data Passed unchanged to every callback invocation.
+ * @return  0  – started (or no-op on unsupported platforms).
+ *         -1  – invalid handle or OS-level failure.
+ */
+RDP_BRIDGE_API int RdpBridge_start_local_clipboard_monitor(
+    void* handle,
+    RdpBridge_LocalClipboardCallback callback,
+    void* user_data);
+
+/**
+ * Stop local clipboard monitoring started by RdpBridge_start_local_clipboard_monitor.
+ * Safe to call when monitoring is not active (no-op).
+ *
+ * @param handle Session handle.
+ */
+RDP_BRIDGE_API void RdpBridge_stop_local_clipboard_monitor(void* handle);
+
+
  * Safe to call from any thread while the session is connected.
  *
  * @param handle     Session handle.

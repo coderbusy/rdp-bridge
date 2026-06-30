@@ -16,15 +16,11 @@ public partial class MainWindowViewModel : ObservableObject, IRdpFrameReceiver, 
     private RdpBridgeClient? _client;
     private bool _started;
 
-    // Injected by the View after AttachedToVisualTree; used for clipboard access.
-    private Func<Task<string?>>? _getLocalClipboard;
-    private Func<string, Task>?  _setLocalClipboard;
+    // Injected by the View; used to write remote clipboard text to local clipboard.
+    private Func<string, Task>? _setLocalClipboard;
 
-    // Last text pushed to / received from local clipboard — used to break feedback loops.
-    private string? _lastLocalClipboard;
+    // Last text received from remote — used to suppress echo when writing to local clipboard.
     private string? _lastRemoteClipboard;
-
-    private DispatcherTimer? _clipboardPollTimer;
 
     [ObservableProperty] private string _host = "192.168.1.1";
     [ObservableProperty] private string _port = "3389";
@@ -46,10 +42,10 @@ public partial class MainWindowViewModel : ObservableObject, IRdpFrameReceiver, 
 
     /// <summary>
     /// Called by the View once it has a TopLevel reference.
+    /// Only the setter is needed — local→remote is handled by the native monitor.
     /// </summary>
-    public void SetClipboardAccessors(Func<Task<string?>> get, Func<string, Task> set)
+    public void SetClipboardAccessors(Func<string, Task> set)
     {
-        _getLocalClipboard = get;
         _setLocalClipboard = set;
     }
 
@@ -73,23 +69,33 @@ public partial class MainWindowViewModel : ObservableObject, IRdpFrameReceiver, 
             IsConnected = state == RdpState.Connected;
             if (state == RdpState.Connected)
             {
-                StartClipboardSync();
+                // Start event-driven local clipboard monitor (Windows: AddClipboardFormatListener;
+                // other platforms: silent no-op, LocalClipboardChanged never fires).
+                _client?.StartLocalClipboardMonitor();
             }
             else if (state is RdpState.Disconnected or RdpState.Failed)
             {
                 _started = false;
-                StopClipboardSync();
                 StatusText = state == RdpState.Failed ? "Connection failed" : "Disconnected";
             }
         });
-        _client.Disconnected   += () => Dispatcher.UIThread.Post(() =>
+        _client.Disconnected += () => Dispatcher.UIThread.Post(() =>
         {
             _started    = false;
             IsConnected = false;
-            StopClipboardSync();
             StatusText  = "Disconnected";
         });
+
+        // Remote → local: native cliprdr channel callback.
         _client.ClipboardReceived += text => Dispatcher.UIThread.Post(() => OnRemoteClipboardReceived(text));
+
+        // Local → remote: native monitor callback (event-driven on Windows).
+        _client.LocalClipboardChanged += text =>
+        {
+            // Guard: don't echo back text that came from the remote side.
+            if (text == _lastRemoteClipboard) return;
+            _client?.SetClipboardText(text);
+        };
 
         _ = Task.Run(() =>
         {
@@ -119,10 +125,10 @@ public partial class MainWindowViewModel : ObservableObject, IRdpFrameReceiver, 
     [RelayCommand]
     private void Disconnect()
     {
+        _client?.StopLocalClipboardMonitor();
         _client?.Disconnect();
         _started    = false;
         IsConnected = false;
-        StopClipboardSync();
         StatusText  = "Disconnected";
     }
 
@@ -139,45 +145,7 @@ public partial class MainWindowViewModel : ObservableObject, IRdpFrameReceiver, 
         if (IsConnected) _client?.SendKey(scancode, down);
     }
 
-    // ── Clipboard sync ────────────────────────────────────────────────────────
-
-    private void StartClipboardSync()
-    {
-        if (_clipboardPollTimer != null) return;
-        _lastLocalClipboard  = null;
-        _lastRemoteClipboard = null;
-
-        _clipboardPollTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(500),
-            DispatcherPriority.Background, OnClipboardPollTick);
-        _clipboardPollTimer.Start();
-    }
-
-    private void StopClipboardSync()
-    {
-        _clipboardPollTimer?.Stop();
-        _clipboardPollTimer = null;
-    }
-
-    private async void OnClipboardPollTick(object? sender, EventArgs e)
-    {
-        if (_getLocalClipboard == null || _client == null || !IsConnected) return;
-
-        try
-        {
-            var text = await _getLocalClipboard();
-            if (text == null || text == _lastLocalClipboard) return;
-            _lastLocalClipboard = text;
-
-            // Don't echo back text that arrived from the remote side.
-            if (text == _lastRemoteClipboard) return;
-
-            _client.SetClipboardText(text);
-        }
-        catch
-        {
-            // Clipboard access can throw; never crash the session.
-        }
-    }
+    // ── Remote → local clipboard ──────────────────────────────────────────────
 
     private async void OnRemoteClipboardReceived(string text)
     {
@@ -185,8 +153,6 @@ public partial class MainWindowViewModel : ObservableObject, IRdpFrameReceiver, 
         if (text == _lastRemoteClipboard) return;
 
         _lastRemoteClipboard = text;
-        _lastLocalClipboard  = text; // suppress the next poll round-trip
-
         try
         {
             await _setLocalClipboard(text);
@@ -225,7 +191,7 @@ public partial class MainWindowViewModel : ObservableObject, IRdpFrameReceiver, 
 
     public void Dispose()
     {
-        StopClipboardSync();
+        _client?.StopLocalClipboardMonitor();
         _client?.Dispose();
         _client = null;
     }

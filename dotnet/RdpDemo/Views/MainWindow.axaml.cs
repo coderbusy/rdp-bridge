@@ -19,7 +19,6 @@ public partial class MainWindow : Window
             if (clipboard == null) return;
 
             vm.SetClipboardAccessors(
-                () => clipboard.TryGetTextAsync(),
                 text => clipboard.SetTextAsync(text));
         };
     }
