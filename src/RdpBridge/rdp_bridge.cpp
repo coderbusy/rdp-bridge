@@ -16,6 +16,7 @@
 #else
 #include <dlfcn.h>
 #include <iconv.h>
+#include <sys/select.h>
 #endif
 
 #include <openssl/provider.h>
@@ -1045,9 +1046,51 @@ void connection_thread(RdpSession* session)
         return;
     }
 
+    // Event loop: block on OS handles until data arrives, then dispatch.
+    // freerdp_check_fds() is a legacy busy-poll API — avoid it here.
     while (session->running)
     {
-        if (freerdp_check_fds(session->instance) != TRUE)
+        HANDLE handles[64];
+        DWORD  count = 0;
+        if (freerdp_get_event_handles(session->instance->context,
+                                      handles, ARRAYSIZE(handles), &count) != TRUE)
+        {
+            set_error(session, "freerdp_get_event_handles failed.");
+            break;
+        }
+
+#if defined(_WIN32)
+        const DWORD waitResult = WaitForMultipleObjects(count, handles, FALSE, 100);
+        if (waitResult == WAIT_FAILED)
+        {
+            set_error(session, "WaitForMultipleObjects failed.");
+            break;
+        }
+#else
+        // On POSIX, freerdp_get_event_handles returns file descriptors cast to
+        // HANDLE (void*). Build an fd_set and call select() with a short timeout
+        // so we also respect session->running without busy-waiting.
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        int maxfd = -1;
+        for (DWORD i = 0; i < count; ++i)
+        {
+            int fd = static_cast<int>(reinterpret_cast<intptr_t>(handles[i]));
+            if (fd >= 0 && fd < FD_SETSIZE)
+            {
+                FD_SET(fd, &rfds);
+                if (fd > maxfd) maxfd = fd;
+            }
+        }
+        struct timeval tv{ 0, 100'000 }; // 100 ms
+        if (maxfd >= 0)
+            select(maxfd + 1, &rfds, nullptr, nullptr, &tv);
+#endif
+
+        if (!session->running)
+            break;
+
+        if (freerdp_check_event_handles(session->instance->context) != TRUE)
         {
             set_error(session, "FreeRDP transport closed.");
             break;
