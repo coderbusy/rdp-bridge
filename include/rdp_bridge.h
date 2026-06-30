@@ -17,6 +17,44 @@ extern "C" {
 #endif
 
 /**
+ * Session state enumeration delivered by RdpBridge_StateCallback.
+ */
+typedef enum RdpBridge_State
+{
+    RdpBridge_State_Connecting   = 0,
+    RdpBridge_State_Connected    = 1,
+    RdpBridge_State_Disconnected = 2,
+    RdpBridge_State_Failed       = 3
+} RdpBridge_State;
+
+/**
+ * State callback: called each time the session transitions to a new state.
+ *
+ * @param user_data Opaque pointer supplied via RdpBridge_set_state_callback.
+ * @param state     New session state.
+ */
+typedef void (*RdpBridge_StateCallback)(void* user_data, RdpBridge_State state);
+
+/**
+ * Clipboard callback: delivers remote clipboard text to the caller.
+ *
+ * @param user_data  Opaque pointer supplied via RdpBridge_set_clipboard_callback.
+ * @param utf8_text  Null-terminated UTF-8 string, valid only during the callback.
+ */
+typedef void (*RdpBridge_ClipboardCallback)(void* user_data, const char* utf8_text);
+
+/** Experience flag: disable desktop wallpaper. */
+#define RDPBRIDGE_EXPERIENCE_DISABLE_WALLPAPER        0x01u
+/** Experience flag: disable full-window drag. */
+#define RDPBRIDGE_EXPERIENCE_DISABLE_FULL_WINDOW_DRAG 0x02u
+/** Experience flag: disable menu animations. */
+#define RDPBRIDGE_EXPERIENCE_DISABLE_MENU_ANIMS       0x04u
+/** Experience flag: disable desktop themes. */
+#define RDPBRIDGE_EXPERIENCE_DISABLE_THEMES           0x08u
+/** Experience flag: enable font smoothing (ClearType). */
+#define RDPBRIDGE_EXPERIENCE_ENABLE_FONT_SMOOTHING    0x10u
+
+/**
  * Framebuffer callback: called whenever a new frame is available.
  *
  * @param user_data   Opaque pointer supplied via RdpBridge_set_callbacks.
@@ -148,6 +186,88 @@ RDP_BRIDGE_API void RdpBridge_send_unicode_key(void* handle, uint16_t code, int 
  *         The pointer is valid until the next API call on the same handle.
  */
 RDP_BRIDGE_API const char* RdpBridge_get_last_error(void* handle);
+
+/**
+ * Set optional connection parameters.  Call before RdpBridge_connect.
+ * Parameters not supplied (NULL / 0) keep their defaults.
+ *
+ * @param handle       Session handle.
+ * @param domain       Windows domain (UTF-8).  NULL or "" = no domain.
+ * @param color_depth  16, 24, or 32.  0 = default (32).
+ * @param experience   Bitmask of RDPBRIDGE_EXPERIENCE_* flags.  0 = defaults.
+ */
+RDP_BRIDGE_API void RdpBridge_set_options(
+    void* handle,
+    const char* domain,
+    int color_depth,
+    uint32_t experience);
+
+/**
+ * Register a local directory to expose as a network drive on the remote.
+ * Call before RdpBridge_connect; may be called multiple times.
+ *
+ * @param handle      Session handle.
+ * @param name        Share name visible on the remote (e.g. "LocalDisk").
+ * @param local_path  Local filesystem path (UTF-8).
+ */
+RDP_BRIDGE_API void RdpBridge_add_drive(
+    void* handle,
+    const char* name,
+    const char* local_path);
+
+/**
+ * Register a structured state callback.
+ * Independent of RdpBridge_set_callbacks; either or both may be used.
+ *
+ * @param handle         Session handle.
+ * @param state_callback Called on every state transition.  NULL = unregister.
+ */
+RDP_BRIDGE_API void RdpBridge_set_state_callback(
+    void* handle,
+    RdpBridge_StateCallback state_callback);
+
+/**
+ * Register a callback that receives remote clipboard text.
+ * Setting a non-NULL callback also enables the CLIPRDR virtual channel
+ * for the next RdpBridge_connect call on this handle.
+ *
+ * @param handle             Session handle.
+ * @param clipboard_callback Called when the remote clipboard changes.
+ *                           NULL = unregister.
+ */
+RDP_BRIDGE_API void RdpBridge_set_clipboard_callback(
+    void* handle,
+    RdpBridge_ClipboardCallback clipboard_callback);
+
+/**
+ * Push local text to the remote clipboard.
+ * Safe to call from any thread while the session is connected.
+ *
+ * @param handle     Session handle.
+ * @param utf8_text  Null-terminated UTF-8 string.
+ * @return  0  – announced successfully.
+ *         -1  – not connected or CLIPRDR channel not available.
+ */
+RDP_BRIDGE_API int RdpBridge_clipboard_set_text(
+    void* handle,
+    const char* utf8_text);
+
+/**
+ * Request a dynamic desktop resize.
+ * Requires the DISP virtual channel, which is loaded automatically when
+ * RdpBridge_resize has been called before RdpBridge_connect on the same handle.
+ * Also safe to call before connecting to update the initial resolution.
+ *
+ * @param handle  Session handle.
+ * @param width   New desktop width in pixels.
+ * @param height  New desktop height in pixels.
+ * @return  0  – resize request sent.
+ *         -1  – not connected or DISP channel not available.
+ */
+RDP_BRIDGE_API int RdpBridge_resize(
+    void* handle,
+    int width,
+    int height);
 
 #ifdef __cplusplus
 }

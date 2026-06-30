@@ -64,11 +64,11 @@ jobs:
 
       - name: Verify DLL exists
         run: |
-          if (!(Test-Path "build/Release/RdpBridge.dll")) {
-            Write-Error "RdpBridge.dll not found"
+          if (!(Test-Path "build/Release/RdpBridgeNative.dll")) {
+            Write-Error "RdpBridgeNative.dll not found"
             exit 1
           }
-          Get-Item "build/Release/RdpBridge.dll"
+          Get-Item "build/Release/RdpBridgeNative.dll"
         shell: pwsh
 
       # -----------------------------------------------------------------------
@@ -80,8 +80,8 @@ jobs:
           New-Item -ItemType Directory -Force sdk-windows/lib     | Out-Null
           New-Item -ItemType Directory -Force sdk-windows/bin     | Out-Null
           Copy-Item include/rdp_bridge.h            sdk-windows/include/
-          Copy-Item build/Release/RdpBridge.dll     sdk-windows/bin/
-          Copy-Item build/Release/RdpBridge.lib     sdk-windows/lib/ -ErrorAction SilentlyContinue
+          Copy-Item build/Release/RdpBridgeNative.dll     sdk-windows/bin/
+          Copy-Item build/Release/RdpBridgeNative.lib     sdk-windows/lib/ -ErrorAction SilentlyContinue
           Compress-Archive -Path sdk-windows/* -DestinationPath ${{ matrix.artifact }}.zip
         shell: pwsh
 
@@ -133,7 +133,7 @@ jobs:
             $dest = "dotnet/RdpBridge/runtimes/$($entry.rid)/native"
             New-Item -ItemType Directory -Force $dest | Out-Null
             Expand-Archive -Path $entry.zip -DestinationPath "extracted/$($entry.rid)" -Force
-            Copy-Item "extracted/$($entry.rid)/bin/RdpBridge.dll" $dest
+            Copy-Item "extracted/$($entry.rid)/bin/RdpBridgeNative.dll" $dest
           }
         shell: pwsh
 

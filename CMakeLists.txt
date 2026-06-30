@@ -20,6 +20,7 @@ option(FREERDP_STATIC "Link FreeRDP/WinPR/OpenSSL statically into RdpBridge" ${F
 # Dependencies
 # ---------------------------------------------------------------------------
 find_package(FreeRDP REQUIRED CONFIG)
+find_package(FreeRDP-Client REQUIRED CONFIG)
 find_package(WinPR REQUIRED CONFIG)
 find_package(OpenSSL REQUIRED)
 # cjson is a FreeRDP dependency that vcpkg doesn't propagate transitively
@@ -54,6 +55,7 @@ if(UNIX AND NOT APPLE AND FREERDP_STATIC)
     target_link_libraries(RdpBridge PRIVATE
         -Wl,--whole-archive
         freerdp
+        freerdp-client
         winpr
         OpenSSL::Crypto
         -Wl,--no-whole-archive
@@ -61,6 +63,7 @@ if(UNIX AND NOT APPLE AND FREERDP_STATIC)
 else()
     target_link_libraries(RdpBridge PRIVATE
         freerdp
+        freerdp-client
         winpr
         OpenSSL::Crypto
     )
@@ -78,18 +81,18 @@ target_compile_definitions(RdpBridge PRIVATE RDP_BRIDGE_EXPORTS)
 # Platform-specific library naming and RPATH
 if(WIN32)
     set_target_properties(RdpBridge PROPERTIES PREFIX "")
-    set_target_properties(RdpBridge PROPERTIES OUTPUT_NAME "RdpBridge")
+    set_target_properties(RdpBridge PROPERTIES OUTPUT_NAME "RdpBridgeNative")
 elseif(APPLE)
     set_target_properties(RdpBridge PROPERTIES
         INSTALL_RPATH "@loader_path"
         BUILD_WITH_INSTALL_RPATH TRUE
-        OUTPUT_NAME "RdpBridge"
+        OUTPUT_NAME "RdpBridgeNative"
     )
 else()
     set_target_properties(RdpBridge PROPERTIES
         INSTALL_RPATH "$ORIGIN"
         BUILD_WITH_INSTALL_RPATH TRUE
-        OUTPUT_NAME "RdpBridge"
+        OUTPUT_NAME "RdpBridgeNative"
     )
 endif()
 

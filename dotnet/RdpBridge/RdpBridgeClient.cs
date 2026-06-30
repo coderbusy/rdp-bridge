@@ -6,11 +6,13 @@ namespace CoderBusy.RdpBridge;
 
 public sealed class RdpBridgeClient : IDisposable
 {
-    private const string LibraryName = "RdpBridge";
+    private const string LibraryName = "RdpBridgeNative";
     private static readonly object DebugLogLock = new();
     private readonly FrameCallback _frameCallback;
     private readonly StatusCallback _statusCallback;
     private readonly DisconnectCallback _disconnectCallback;
+    private readonly StateCallback _stateCallback;
+    private readonly ClipboardCallback _clipboardCallback;
     private IntPtr _handle;
 
     static RdpBridgeClient()
@@ -21,17 +23,27 @@ public sealed class RdpBridgeClient : IDisposable
     public event EventHandler<RdpFramebufferEventArgs>? FramebufferUpdated;
     public event Action<string>? StatusChanged;
     public event Action? Disconnected;
+    public event Action<RdpState>? StateChanged;
+    public event Action<string>? ClipboardReceived;
 
     public static string DebugLogPath => Path.Combine(GetDebugLogDirectory(), "rdp-debug.log");
 
     public RdpBridgeClient()
     {
-        _frameCallback = OnFrame;
-        _statusCallback = OnStatus;
+        _frameCallback      = OnFrame;
+        _statusCallback     = OnStatus;
         _disconnectCallback = OnDisconnected;
+        _stateCallback      = OnState;
+        _clipboardCallback  = OnClipboard;
     }
 
     public void Connect(string host, int port, string username, string password, int width, int height)
+    {
+        Connect(host, port, username, password, width, height, options: null);
+    }
+
+    public void Connect(string host, int port, string username, string password, int width, int height,
+        RdpConnectOptions? options)
     {
         Disconnect();
 
@@ -44,6 +56,15 @@ public sealed class RdpBridgeClient : IDisposable
         }
 
         NativeMethods.RdpBridge_set_callbacks(_handle, _frameCallback, _statusCallback, _disconnectCallback, IntPtr.Zero);
+        NativeMethods.RdpBridge_set_state_callback(_handle, _stateCallback);
+        NativeMethods.RdpBridge_set_clipboard_callback(_handle, _clipboardCallback);
+
+        if (options != null)
+        {
+            NativeMethods.RdpBridge_set_options(_handle, options.Domain, options.ColorDepth, (uint)options.Experience);
+            foreach (var drive in options.Drives)
+                NativeMethods.RdpBridge_add_drive(_handle, drive.Name, drive.LocalPath);
+        }
 
         var result = NativeMethods.RdpBridge_connect(_handle, host, port, username, password, width, height);
         if (result != 0)
@@ -77,6 +98,24 @@ public sealed class RdpBridgeClient : IDisposable
             NativeMethods.RdpBridge_send_unicode_key(_handle, key, down ? 1 : 0);
     }
 
+    /// <summary>
+    /// Push text to the remote clipboard. Requires clipboard callback to have been registered before Connect.
+    /// </summary>
+    public bool SetClipboardText(string text)
+    {
+        if (_handle == IntPtr.Zero) return false;
+        return NativeMethods.RdpBridge_clipboard_set_text(_handle, text) == 0;
+    }
+
+    /// <summary>
+    /// Request a dynamic desktop resize. Safe to call before or after Connect.
+    /// </summary>
+    public bool Resize(int width, int height)
+    {
+        if (_handle == IntPtr.Zero) return false;
+        return NativeMethods.RdpBridge_resize(_handle, width, height) == 0;
+    }
+
     public void Disconnect()
     {
         if (_handle == IntPtr.Zero)
@@ -106,10 +145,10 @@ public sealed class RdpBridgeClient : IDisposable
     public static string GetExpectedNativeLibraryName()
     {
         if (OperatingSystem.IsWindows())
-            return "RdpBridge.dll";
+            return "RdpBridgeNative.dll";
         if (OperatingSystem.IsMacOS())
-            return "libRdpBridge.dylib";
-        return "libRdpBridge.so";
+            return "libRdpBridgeNative.dylib";
+        return "libRdpBridgeNative.so";
     }
 
     private static IntPtr ResolveNativeLibrary(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
@@ -131,26 +170,30 @@ public sealed class RdpBridgeClient : IDisposable
         var baseDirectory = AppContext.BaseDirectory;
         var fileName = GetExpectedNativeLibraryName();
         var rid = GetCurrentRid();
+
+        // Prefer runtimes/<rid>/native/ before the base directory so the
+        // managed RdpBridge.dll (project reference output) is not mistaken
+        // for the native library.
         var candidates = new List<string>
         {
+            Path.Combine(baseDirectory, "runtimes", rid, "native", fileName),
             Path.Combine(baseDirectory, fileName),
-            Path.Combine(baseDirectory, "runtimes", rid, "native", fileName)
         };
 
         var processDirectory = Path.GetDirectoryName(Environment.ProcessPath);
         if (!string.IsNullOrWhiteSpace(processDirectory) &&
             !string.Equals(processDirectory, baseDirectory, StringComparison.OrdinalIgnoreCase))
         {
-            candidates.Add(Path.Combine(processDirectory, fileName));
             candidates.Add(Path.Combine(processDirectory, "runtimes", rid, "native", fileName));
+            candidates.Add(Path.Combine(processDirectory, fileName));
         }
 
         if (AppContext.GetData("NATIVE_DLL_SEARCH_DIRECTORIES") is string nativeSearchDirectories)
         {
             foreach (var directory in nativeSearchDirectories.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
             {
-                candidates.Add(Path.Combine(directory, fileName));
                 candidates.Add(Path.Combine(directory, "runtimes", rid, "native", fileName));
+                candidates.Add(Path.Combine(directory, fileName));
             }
         }
 
@@ -200,6 +243,19 @@ public sealed class RdpBridgeClient : IDisposable
         Disconnected?.Invoke();
     }
 
+    private void OnState(IntPtr userData, RdpState state)
+    {
+        DebugLog($"state {state}");
+        StateChanged?.Invoke(state);
+    }
+
+    private void OnClipboard(IntPtr userData, IntPtr text)
+    {
+        var value = text == IntPtr.Zero ? string.Empty : Marshal.PtrToStringUTF8(text) ?? string.Empty;
+        if (!string.IsNullOrEmpty(value))
+            ClipboardReceived?.Invoke(value);
+    }
+
     private static string GetDebugLogDirectory()
     {
         var root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
@@ -239,6 +295,12 @@ public sealed class RdpBridgeClient : IDisposable
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void DisconnectCallback(IntPtr userData);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void StateCallback(IntPtr userData, RdpState state);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void ClipboardCallback(IntPtr userData, IntPtr utf8Text);
 
     private static class NativeMethods
     {
@@ -280,5 +342,32 @@ public sealed class RdpBridgeClient : IDisposable
 
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
         public static extern IntPtr RdpBridge_get_last_error(IntPtr handle);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void RdpBridge_set_options(
+            IntPtr handle,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string? domain,
+            int colorDepth,
+            uint experience);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void RdpBridge_add_drive(
+            IntPtr handle,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string name,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string localPath);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void RdpBridge_set_state_callback(IntPtr handle, StateCallback stateCallback);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void RdpBridge_set_clipboard_callback(IntPtr handle, ClipboardCallback clipboardCallback);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int RdpBridge_clipboard_set_text(
+            IntPtr handle,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string utf8Text);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int RdpBridge_resize(IntPtr handle, int width, int height);
     }
 }

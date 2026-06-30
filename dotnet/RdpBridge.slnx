@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="RdpBridge/RdpBridge.csproj" />
+  <Project Path="RdpSmokeTest/RdpSmokeTest.csproj" />
+</Solution>

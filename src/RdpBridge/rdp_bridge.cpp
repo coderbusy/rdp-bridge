@@ -15,6 +15,7 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#include <iconv.h>
 #endif
 
 #include <openssl/provider.h>
@@ -28,6 +29,12 @@ extern "C" {
 #include <freerdp/error.h>
 #include <freerdp/settings.h>
 #include <freerdp/settings_keys.h>
+#include <freerdp/channels/channels.h>
+#include <freerdp/client/channels.h>
+#include <freerdp/client/cliprdr.h>
+#include <freerdp/channels/cliprdr.h>
+#include <freerdp/client/disp.h>
+#include <freerdp/channels/disp.h>
 #include <winpr/winsock.h>
 }
 
@@ -51,15 +58,29 @@ struct RdpSession
     std::string host;
     std::string username;
     std::string password;
+    std::string domain;
     int port = 3389;
     int width = 1024;
     int height = 768;
+    int color_depth = 32;
+    uint32_t experience_flags = 0;
     bool wsa_started = false;
     bool openssl_providers_loaded = false;
+    bool want_disp_channel = false;
+
+    struct DriveEntry { std::string name, path; };
+    std::vector<DriveEntry> drives;
+
     RdpBridge_FrameCallback frame_callback = nullptr;
     RdpBridge_StatusCallback status_callback = nullptr;
     RdpBridge_DisconnectCallback disconnect_callback = nullptr;
+    RdpBridge_StateCallback state_callback = nullptr;
+    RdpBridge_ClipboardCallback clipboard_callback = nullptr;
     void* user_data = nullptr;
+
+    CliprdrClientContext* cliprdr = nullptr;
+    std::string pending_local_text;
+
     std::string last_error;
 };
 
@@ -116,6 +137,17 @@ int rdp_verify_x509_certificate(
     UINT16 port,
     DWORD flags);
 int rdp_logon_error(freerdp* instance, UINT32 data, UINT32 type);
+
+// ---------------------------------------------------------------------------
+// Clipboard (cliprdr) forward declarations
+// ---------------------------------------------------------------------------
+
+static void cliprdr_announce_formats(CliprdrClientContext* context);
+static UINT cliprdr_server_capabilities(CliprdrClientContext* context, const CLIPRDR_CAPABILITIES* capabilities);
+static UINT cliprdr_server_format_list(CliprdrClientContext* context, const CLIPRDR_FORMAT_LIST* formatList);
+static UINT cliprdr_server_format_list_response(CliprdrClientContext* context, const CLIPRDR_FORMAT_LIST_RESPONSE* response);
+static UINT cliprdr_server_format_data_request(CliprdrClientContext* context, const CLIPRDR_FORMAT_DATA_REQUEST* request);
+static UINT cliprdr_server_format_data_response(CliprdrClientContext* context, const CLIPRDR_FORMAT_DATA_RESPONSE* response);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -189,6 +221,16 @@ void notify_status(RdpSession* session, const char* message)
     std::lock_guard<std::mutex> lock(session->callback_mutex);
     if (session->status_callback)
         session->status_callback(session->user_data, message);
+}
+
+void notify_state(RdpSession* session, RdpBridge_State state)
+{
+    if (!session)
+        return;
+
+    std::lock_guard<std::mutex> lock(session->callback_mutex);
+    if (session->state_callback)
+        session->state_callback(session->user_data, state);
 }
 
 std::string get_library_directory()
@@ -388,7 +430,7 @@ BOOL rdp_authenticate(
     if (domain)
     {
         std::free(*domain);
-        *domain = duplicate_string("");
+        *domain = duplicate_string(session->domain);
     }
 
     return TRUE;
@@ -468,6 +510,241 @@ int rdp_logon_error(freerdp* instance, UINT32 data, UINT32 type)
     return 1;
 }
 
+// ---------------------------------------------------------------------------
+// UTF-16LE ↔ UTF-8 conversion helpers
+// ---------------------------------------------------------------------------
+
+// Convert UTF-8 to UTF-16LE. Returns byte vector including null terminator.
+static std::vector<uint8_t> utf8_to_utf16le(const std::string& utf8)
+{
+    std::vector<uint8_t> result;
+    if (utf8.empty())
+    {
+        result.push_back(0);
+        result.push_back(0);
+        return result;
+    }
+#if defined(_WIN32)
+    const int wlen = MultiByteToWideChar(
+        CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+    if (wlen <= 0)
+    {
+        result.push_back(0);
+        result.push_back(0);
+        return result;
+    }
+    result.resize(static_cast<size_t>(wlen) * 2);
+    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1,
+        reinterpret_cast<LPWSTR>(result.data()), wlen);
+#else
+    iconv_t cd = iconv_open("UTF-16LE", "UTF-8");
+    if (cd == reinterpret_cast<iconv_t>(-1))
+    {
+        result.push_back(0);
+        result.push_back(0);
+        return result;
+    }
+    // Allocate worst-case: 4 bytes per UTF-8 byte + 2 for null terminator
+    result.resize(utf8.size() * 4 + 2);
+    char* inbuf  = const_cast<char*>(utf8.c_str());
+    size_t inleft  = utf8.size();
+    char* outbuf   = reinterpret_cast<char*>(result.data());
+    size_t outleft = result.size() - 2; // reserve 2 for null terminator
+    iconv(cd, &inbuf, &inleft, &outbuf, &outleft);
+    iconv_close(cd);
+    const size_t written = result.size() - 2 - outleft;
+    result.resize(written + 2);
+    result[written]     = 0;
+    result[written + 1] = 0;
+#endif
+    return result;
+}
+
+// Convert UTF-16LE byte buffer to UTF-8 string. dataLen is in bytes.
+static std::string utf16le_to_utf8(const uint8_t* data, size_t dataLen)
+{
+    if (!data || dataLen < 2)
+        return {};
+#if defined(_WIN32)
+    const int chars = WideCharToMultiByte(
+        CP_UTF8, 0,
+        reinterpret_cast<LPCWCH>(data),
+        static_cast<int>(dataLen / 2),
+        nullptr, 0, nullptr, nullptr);
+    if (chars <= 0)
+        return {};
+    std::string result(static_cast<size_t>(chars), '\0');
+    WideCharToMultiByte(CP_UTF8, 0,
+        reinterpret_cast<LPCWCH>(data),
+        static_cast<int>(dataLen / 2),
+        result.data(), chars, nullptr, nullptr);
+    while (!result.empty() && result.back() == '\0')
+        result.pop_back();
+    return result;
+#else
+    iconv_t cd = iconv_open("UTF-8", "UTF-16LE");
+    if (cd == reinterpret_cast<iconv_t>(-1))
+        return {};
+    std::string result(dataLen * 2, '\0');
+    char* inbuf    = const_cast<char*>(reinterpret_cast<const char*>(data));
+    size_t inleft  = dataLen;
+    char* outbuf   = result.data();
+    size_t outleft = result.size();
+    iconv(cd, &inbuf, &inleft, &outbuf, &outleft);
+    iconv_close(cd);
+    result.resize(result.size() - outleft);
+    while (!result.empty() && result.back() == '\0')
+        result.pop_back();
+    return result;
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Clipboard (cliprdr) callbacks
+// ---------------------------------------------------------------------------
+
+static RdpSession* cliprdr_get_session(CliprdrClientContext* context)
+{
+    return context ? static_cast<RdpSession*>(context->custom) : nullptr;
+}
+
+static void cliprdr_announce_formats(CliprdrClientContext* context)
+{
+    CLIPRDR_FORMAT fmt{};
+    fmt.formatId   = CF_UNICODETEXT;
+    fmt.formatName = nullptr;
+
+    CLIPRDR_FORMAT_LIST list{};
+    list.common.msgType  = CB_FORMAT_LIST;
+    list.common.msgFlags = 0;
+    list.numFormats      = 1;
+    list.formats         = &fmt;
+
+    context->ClientFormatList(context, &list);
+}
+
+static UINT cliprdr_server_capabilities(
+    CliprdrClientContext* context,
+    const CLIPRDR_CAPABILITIES* /*capabilities*/)
+{
+    // Reply with our own capabilities
+    CLIPRDR_GENERAL_CAPABILITY_SET generalCap{};
+    generalCap.capabilitySetType   = CB_CAPSTYPE_GENERAL;
+    generalCap.capabilitySetLength = CB_CAPSTYPE_GENERAL_LEN;
+    generalCap.version             = CB_CAPS_VERSION_2;
+    generalCap.generalFlags        = CB_USE_LONG_FORMAT_NAMES;
+
+    CLIPRDR_CAPABILITIES clientCaps{};
+    clientCaps.cCapabilitiesSets = 1;
+    clientCaps.capabilitySets    =
+        reinterpret_cast<CLIPRDR_CAPABILITY_SET*>(&generalCap);
+
+    context->ClientCapabilities(context, &clientCaps);
+
+    // Announce that we have clipboard data (text)
+    cliprdr_announce_formats(context);
+
+    return CHANNEL_RC_OK;
+}
+
+static UINT cliprdr_server_format_list(
+    CliprdrClientContext* context,
+    const CLIPRDR_FORMAT_LIST* formatList)
+{
+    // Acknowledge
+    CLIPRDR_FORMAT_LIST_RESPONSE resp{};
+    resp.common.msgType  = CB_FORMAT_LIST_RESPONSE;
+    resp.common.msgFlags = CB_RESPONSE_OK;
+    context->ClientFormatListResponse(context, &resp);
+
+    // If the remote offers CF_UNICODETEXT, request it
+    for (UINT32 i = 0; i < formatList->numFormats; ++i)
+    {
+        if (formatList->formats[i].formatId == CF_UNICODETEXT)
+        {
+            CLIPRDR_FORMAT_DATA_REQUEST req{};
+            req.common.msgType       = CB_FORMAT_DATA_REQUEST;
+            req.common.msgFlags      = 0;
+            req.requestedFormatId    = CF_UNICODETEXT;
+            context->ClientFormatDataRequest(context, &req);
+            break;
+        }
+    }
+
+    return CHANNEL_RC_OK;
+}
+
+static UINT cliprdr_server_format_list_response(
+    CliprdrClientContext* /*context*/,
+    const CLIPRDR_FORMAT_LIST_RESPONSE* /*response*/)
+{
+    return CHANNEL_RC_OK;
+}
+
+static UINT cliprdr_server_format_data_request(
+    CliprdrClientContext* context,
+    const CLIPRDR_FORMAT_DATA_REQUEST* request)
+{
+    auto* session = cliprdr_get_session(context);
+
+    CLIPRDR_FORMAT_DATA_RESPONSE resp{};
+    resp.common.msgType = CB_FORMAT_DATA_RESPONSE;
+
+    if (!session || request->requestedFormatId != CF_UNICODETEXT)
+    {
+        resp.common.msgFlags     = CB_RESPONSE_FAIL;
+        resp.common.dataLen      = 0;
+        resp.requestedFormatData = nullptr;
+        context->ClientFormatDataResponse(context, &resp);
+        return CHANNEL_RC_OK;
+    }
+
+    std::string utf8Text;
+    {
+        std::lock_guard<std::mutex> lock(session->callback_mutex);
+        utf8Text = session->pending_local_text;
+    }
+
+    const auto utf16 = utf8_to_utf16le(utf8Text);
+
+    resp.common.msgFlags     = CB_RESPONSE_OK;
+    resp.common.dataLen      = static_cast<UINT32>(utf16.size());
+    resp.requestedFormatData = utf16.data();
+    context->ClientFormatDataResponse(context, &resp);
+
+    return CHANNEL_RC_OK;
+}
+
+static UINT cliprdr_server_format_data_response(
+    CliprdrClientContext* context,
+    const CLIPRDR_FORMAT_DATA_RESPONSE* response)
+{
+    auto* session = cliprdr_get_session(context);
+    if (!session)
+        return CHANNEL_RC_OK;
+
+    if (response->common.msgFlags != CB_RESPONSE_OK ||
+        !response->requestedFormatData || response->common.dataLen < 2)
+        return CHANNEL_RC_OK;
+
+    const std::string utf8 = utf16le_to_utf8(
+        response->requestedFormatData,
+        static_cast<size_t>(response->common.dataLen));
+
+    if (!utf8.empty())
+    {
+        std::lock_guard<std::mutex> lock(session->callback_mutex);
+        if (session->clipboard_callback)
+            session->clipboard_callback(session->user_data, utf8.c_str());
+    }
+
+    return CHANNEL_RC_OK;
+}
+
+// ---------------------------------------------------------------------------
+// Paint callbacks
+// ---------------------------------------------------------------------------
+
 BOOL rdp_begin_paint(rdpContext* context)
 {
     if (!context || !context->gdi)
@@ -513,6 +790,39 @@ BOOL rdp_pre_connect(freerdp* instance)
         instance->context->settings, FreeRDP_OsMajorType, OSMAJORTYPE_WINDOWS);
     freerdp_settings_set_uint32(
         instance->context->settings, FreeRDP_OsMinorType, OSMINORTYPE_WINDOWS_NT);
+
+    auto* session = get_session(instance->context);
+
+    // Drive redirection
+    if (session && !session->drives.empty())
+    {
+        freerdp_settings_set_bool(
+            instance->context->settings, FreeRDP_DeviceRedirection, TRUE);
+        for (const auto& d : session->drives)
+        {
+            auto* drive = static_cast<RDPDR_DRIVE*>(
+                std::calloc(1, sizeof(RDPDR_DRIVE)));
+            if (!drive)
+                continue;
+            drive->device.Type = RDPDR_DTYP_FILESYSTEM;
+            drive->device.Name = _strdup(d.name.c_str());
+            drive->Path        = _strdup(d.path.c_str());
+            drive->automount   = FALSE;
+            freerdp_device_collection_add(
+                instance->context->settings,
+                reinterpret_cast<RDPDR_DEVICE*>(drive));
+        }
+    }
+
+    // Load all enabled virtual channel addins (cliprdr, disp, drive, …)
+    if (freerdp_client_load_addins(
+            instance->context->channels,
+            instance->context->settings) < 0)
+    {
+        if (session)
+            notify_status(session, "Warning: some channel addins failed to load.");
+    }
+
     return TRUE;
 }
 
@@ -533,6 +843,25 @@ BOOL rdp_post_connect(freerdp* instance)
 
     instance->context->update->BeginPaint = rdp_begin_paint;
     instance->context->update->EndPaint   = rdp_end_paint;
+
+    // Wire up clipboard virtual channel if enabled
+    if (freerdp_settings_get_bool(instance->context->settings, FreeRDP_RedirectClipboard))
+    {
+        auto* cliprdr = static_cast<CliprdrClientContext*>(
+            freerdp_channels_get_static_channel_interface(
+                instance->context->channels, CLIPRDR_SVC_CHANNEL_NAME));
+        if (cliprdr)
+        {
+            session->cliprdr                    = cliprdr;
+            cliprdr->custom                     = session;
+            cliprdr->ServerCapabilities         = cliprdr_server_capabilities;
+            cliprdr->ServerFormatList           = cliprdr_server_format_list;
+            cliprdr->ServerFormatListResponse   = cliprdr_server_format_list_response;
+            cliprdr->ServerFormatDataRequest    = cliprdr_server_format_data_request;
+            cliprdr->ServerFormatDataResponse   = cliprdr_server_format_data_response;
+        }
+    }
+
     notify_status(session, "RDP connected.");
     return TRUE;
 }
@@ -547,8 +876,10 @@ void rdp_post_disconnect(freerdp* instance)
 
     if (session)
     {
+        session->cliprdr = nullptr;
         const bool wasConnected = session->connected.exchange(false);
         notify_status(session, "RDP disconnected.");
+        notify_state(session, RdpBridge_State_Disconnected);
         std::lock_guard<std::mutex> lock(session->callback_mutex);
         if (wasConnected && session->disconnect_callback)
             session->disconnect_callback(session->user_data);
@@ -562,6 +893,7 @@ void rdp_post_disconnect(freerdp* instance)
 void connection_thread(RdpSession* session)
 {
     notify_status(session, "Connecting RDP...");
+    notify_state(session, RdpBridge_State_Connecting);
 
     {
         std::ostringstream target;
@@ -609,12 +941,17 @@ void connection_thread(RdpSession* session)
             static_cast<uint32_t>(session->port > 0 ? session->port : 3389));
         freerdp_settings_set_string(settings, FreeRDP_Username, session->username.c_str());
         freerdp_settings_set_string(settings, FreeRDP_Password, session->password.c_str());
-        freerdp_settings_set_string(settings, FreeRDP_Domain, "");
+        freerdp_settings_set_string(settings, FreeRDP_Domain,
+            session->domain.empty() ? "" : session->domain.c_str());
         freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth,
             static_cast<uint32_t>(session->width > 0 ? session->width : 1024));
         freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight,
             static_cast<uint32_t>(session->height > 0 ? session->height : 768));
-        freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32);
+        {
+            const uint32_t depth = (session->color_depth == 16 || session->color_depth == 24)
+                ? static_cast<uint32_t>(session->color_depth) : 32u;
+            freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, depth);
+        }
         freerdp_settings_set_bool(settings, FreeRDP_IgnoreCertificate, TRUE);
         freerdp_settings_set_bool(settings, FreeRDP_AutoAcceptCertificate, TRUE);
         freerdp_settings_set_bool(settings, FreeRDP_Authentication, TRUE);
@@ -625,6 +962,22 @@ void connection_thread(RdpSession* session)
         freerdp_settings_set_bool(settings, FreeRDP_SoftwareGdi, TRUE);
         freerdp_settings_set_bool(settings, FreeRDP_RemoteFxCodec, FALSE);
         freerdp_settings_set_bool(settings, FreeRDP_GfxThinClient, FALSE);
+        // Experience flags
+        freerdp_settings_set_bool(settings, FreeRDP_DisableWallpaper,
+            (session->experience_flags & RDPBRIDGE_EXPERIENCE_DISABLE_WALLPAPER) ? TRUE : FALSE);
+        freerdp_settings_set_bool(settings, FreeRDP_DisableFullWindowDrag,
+            (session->experience_flags & RDPBRIDGE_EXPERIENCE_DISABLE_FULL_WINDOW_DRAG) ? TRUE : FALSE);
+        freerdp_settings_set_bool(settings, FreeRDP_DisableMenuAnims,
+            (session->experience_flags & RDPBRIDGE_EXPERIENCE_DISABLE_MENU_ANIMS) ? TRUE : FALSE);
+        freerdp_settings_set_bool(settings, FreeRDP_DisableThemes,
+            (session->experience_flags & RDPBRIDGE_EXPERIENCE_DISABLE_THEMES) ? TRUE : FALSE);
+        freerdp_settings_set_bool(settings, FreeRDP_AllowFontSmoothing,
+            (session->experience_flags & RDPBRIDGE_EXPERIENCE_ENABLE_FONT_SMOOTHING) ? TRUE : FALSE);
+        // Optional channels
+        if (session->clipboard_callback)
+            freerdp_settings_set_bool(settings, FreeRDP_RedirectClipboard, TRUE);
+        if (session->want_disp_channel)
+            freerdp_settings_set_bool(settings, FreeRDP_SupportDisplayControl, TRUE);
         freerdp_settings_set_bool(settings, FreeRDP_NegotiateSecurityLayer,
             profile.negotiate ? TRUE : FALSE);
         freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity,
@@ -678,6 +1031,7 @@ void connection_thread(RdpSession* session)
         }
 
         session->connected = true;
+        notify_state(session, RdpBridge_State_Connected);
         break;
     }
 
@@ -686,6 +1040,7 @@ void connection_thread(RdpSession* session)
         session->running = false;
         if (!lastError.empty())
             set_error(session, lastError);
+        notify_state(session, RdpBridge_State_Failed);
         return;
     }
 
@@ -866,6 +1221,114 @@ RDP_BRIDGE_API const char* RdpBridge_get_last_error(void* handle)
     if (!session)
         return "";
     return session->last_error.c_str();
+}
+
+RDP_BRIDGE_API void RdpBridge_set_options(
+    void* handle,
+    const char* domain,
+    int color_depth,
+    uint32_t experience)
+{
+    auto* session = static_cast<RdpSession*>(handle);
+    if (!session)
+        return;
+    session->domain           = domain ? domain : "";
+    session->color_depth      = (color_depth == 16 || color_depth == 24) ? color_depth : 32;
+    session->experience_flags = experience;
+}
+
+RDP_BRIDGE_API void RdpBridge_add_drive(
+    void* handle,
+    const char* name,
+    const char* local_path)
+{
+    auto* session = static_cast<RdpSession*>(handle);
+    if (!session || !name || !local_path)
+        return;
+    session->drives.push_back({name, local_path});
+}
+
+RDP_BRIDGE_API void RdpBridge_set_state_callback(
+    void* handle,
+    RdpBridge_StateCallback state_callback)
+{
+    auto* session = static_cast<RdpSession*>(handle);
+    if (!session)
+        return;
+    std::lock_guard<std::mutex> lock(session->callback_mutex);
+    session->state_callback = state_callback;
+}
+
+RDP_BRIDGE_API void RdpBridge_set_clipboard_callback(
+    void* handle,
+    RdpBridge_ClipboardCallback clipboard_callback)
+{
+    auto* session = static_cast<RdpSession*>(handle);
+    if (!session)
+        return;
+    std::lock_guard<std::mutex> lock(session->callback_mutex);
+    session->clipboard_callback = clipboard_callback;
+}
+
+RDP_BRIDGE_API int RdpBridge_clipboard_set_text(
+    void* handle,
+    const char* utf8_text)
+{
+    auto* session = static_cast<RdpSession*>(handle);
+    if (!session || !session->connected)
+        return -1;
+
+    {
+        std::lock_guard<std::mutex> lock(session->callback_mutex);
+        session->pending_local_text = utf8_text ? utf8_text : "";
+    }
+
+    if (session->cliprdr)
+    {
+        cliprdr_announce_formats(session->cliprdr);
+        return 0;
+    }
+
+    return -1;
+}
+
+RDP_BRIDGE_API int RdpBridge_resize(
+    void* handle,
+    int width,
+    int height)
+{
+    auto* session = static_cast<RdpSession*>(handle);
+    if (!session)
+        return -1;
+
+    // Always update stored dimensions and mark DISP channel as wanted
+    if (width > 0)  session->width  = width;
+    if (height > 0) session->height = height;
+    session->want_disp_channel = true;
+
+    if (!session->connected || !session->instance || !session->instance->context)
+        return -1;
+
+    auto* disp = static_cast<DispClientContext*>(
+        freerdp_channels_get_static_channel_interface(
+            session->instance->context->channels, DISP_CHANNEL_NAME));
+    if (!disp || !disp->SendMonitorLayout)
+        return -1;
+
+    DISPLAY_CONTROL_MONITOR_LAYOUT monitor{};
+    monitor.Flags              = DISPLAY_CONTROL_MONITOR_PRIMARY;
+    monitor.Left               = 0;
+    monitor.Top                = 0;
+    monitor.Width              = static_cast<UINT32>(width > 0 ? width : session->width);
+    monitor.Height             = static_cast<UINT32>(height > 0 ? height : session->height);
+    monitor.PhysicalWidth      = 0;
+    monitor.PhysicalHeight     = 0;
+    monitor.Orientation        = ORIENTATION_LANDSCAPE;
+    monitor.DesktopScaleFactor = 100;
+    monitor.DeviceScaleFactor  = 100;
+
+    disp->SendMonitorLayout(disp, 1, &monitor);
+    return 0;
 }
 
 } // extern "C"
