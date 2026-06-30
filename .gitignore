@@ -1,0 +1,34 @@
+# Build directories
+build*/
+out/
+
+# Local build scripts and logs
+build-local.bat
+build-local.log
+
+# CMake generated
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CPackConfig.cmake
+CPackSourceConfig.cmake
+
+# Compiled output
+*.dll
+*.lib
+*.exp
+*.so
+*.so.*
+*.a
+*.exe
+
+# IDE / editor
+.vs/
+*.user
+*.suo
+.idea/
+*.sln.DotSettings.user
+
+# vcpkg local install (if ever added to repo)
+vcpkg_installed/
