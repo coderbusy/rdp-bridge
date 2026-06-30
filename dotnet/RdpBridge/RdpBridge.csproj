@@ -7,9 +7,9 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 
     <IsPackable>true</IsPackable>
-    <PackageId>CoderBusy.RdpBridge</PackageId>
+    <PackageId>LuYao.RdpBridge</PackageId>
     <Version>1.0.0</Version>
-    <Authors>CoderBusy</Authors>
+    <Authors>LuYao</Authors>
     <Description>C# wrapper for RdpBridge — a native RDP client library built on FreeRDP.</Description>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/coderbusy/rdp-bridge</RepositoryUrl>

@@ -138,7 +138,10 @@ jobs:
         shell: pwsh
 
       - name: Pack NuGet
-        run: dotnet pack dotnet/RdpBridge/RdpBridge.csproj -c Release -o nupkg
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          if (-not $version -or $version -eq '${{ github.ref_name }}') { $version = '0.0.0-dev' }
+          dotnet pack dotnet/RdpBridge/RdpBridge.csproj -c Release -o nupkg -p:Version=$version
         shell: pwsh
 
       - name: Upload NuGet artifact

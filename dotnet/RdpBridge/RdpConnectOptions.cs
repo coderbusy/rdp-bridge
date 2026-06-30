@@ -1,4 +1,4 @@
-namespace CoderBusy.RdpBridge;
+namespace LuYao.RdpBridge;
 
 /// <summary>
 /// Optional parameters passed to <see cref="RdpBridgeClient.Connect(string,int,string,string,int,int,RdpConnectOptions?)"/>.

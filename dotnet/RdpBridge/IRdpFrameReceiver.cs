@@ -1,4 +1,4 @@
-namespace CoderBusy.RdpBridge;
+namespace LuYao.RdpBridge;
 
 public interface IRdpFrameReceiver
 {

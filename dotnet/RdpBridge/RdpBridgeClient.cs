@@ -2,7 +2,7 @@ using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
 
-namespace CoderBusy.RdpBridge;
+namespace LuYao.RdpBridge;
 
 public sealed class RdpBridgeClient : IDisposable
 {

@@ -1,4 +1,4 @@
-namespace CoderBusy.RdpBridge;
+namespace LuYao.RdpBridge;
 
 [Flags]
 public enum RdpExperienceFlags : uint
