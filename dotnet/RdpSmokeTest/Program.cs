@@ -20,7 +20,6 @@ var domain   = args.Length >= 5 ? args[4] : null;
 
 Console.WriteLine($"[smoke] target {host}:{port} user={username} domain={domain ?? "<none>"}");
 Console.WriteLine($"[smoke] native lib: {RdpBridgeClient.GetExpectedNativeLibraryName()}");
-Console.WriteLine($"[smoke] debug log:  {RdpBridgeClient.DebugLogPath}");
 
 // -- TCP probe ---------------------------------------------------------------
 Console.Write("[smoke] TCP probe... ");

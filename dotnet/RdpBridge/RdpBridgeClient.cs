@@ -1,14 +1,19 @@
+using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
-using System.Text;
 
 namespace CoderBusy.RdpBridge;
 
 public sealed class RdpBridgeClient : IDisposable
 {
     private const string LibraryName = "RdpBridgeNative";
-    private static readonly object DebugLogLock = new();
     private readonly IRdpFrameReceiver? _frameReceiver;
+
+    /// <summary>
+    /// Overrides the log sink for this instance. Receives the formatted log line (without trailing newline).
+    /// Defaults to <see cref="System.Diagnostics.Debug.WriteLine(string)"/> when null.
+    /// </summary>
+    public Action<string>? LogWriter { get; set; }
     private readonly FrameCallback _frameCallback;
     private readonly StatusCallback _statusCallback;
     private readonly DisconnectCallback _disconnectCallback;
@@ -26,7 +31,6 @@ public sealed class RdpBridgeClient : IDisposable
     public event Action<RdpState>? StateChanged;
     public event Action<string>? ClipboardReceived;
 
-    public static string DebugLogPath => Path.Combine(GetDebugLogDirectory(), "rdp-debug.log");
 
     public RdpBridgeClient(IRdpFrameReceiver? frameReceiver = null)
     {
@@ -253,26 +257,20 @@ public sealed class RdpBridgeClient : IDisposable
             ClipboardReceived?.Invoke(value);
     }
 
-    private static string GetDebugLogDirectory()
-    {
-        var root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        if (string.IsNullOrWhiteSpace(root))
-            root = AppContext.BaseDirectory;
-        return Path.Combine(root, "RdpBridge", "Logs");
-    }
-
-    private static void DebugLog(string message)
+    private void DebugLog(string message)
     {
         try
         {
-            Directory.CreateDirectory(GetDebugLogDirectory());
-            var line = $"{DateTimeOffset.Now:O} {message}{Environment.NewLine}";
-            lock (DebugLogLock)
-                File.AppendAllText(DebugLogPath, line, Encoding.UTF8);
+            var line = $"{DateTimeOffset.Now:O} {message}";
+            var writer = LogWriter;
+            if (writer != null)
+                writer(line);
+            else
+                Debug.WriteLine(line);
         }
         catch
         {
-            // Debug logging must not break the RDP session.
+            // Logging must not break the RDP session.
         }
     }
 
