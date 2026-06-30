@@ -19,6 +19,7 @@ public sealed class RdpBridgeClient : IDisposable
     private readonly DisconnectCallback _disconnectCallback;
     private readonly StateCallback _stateCallback;
     private readonly ClipboardCallback _clipboardCallback;
+    private LocalClipboardCallback? _localClipboardCallback;
     private IntPtr _handle;
 
     static RdpBridgeClient()
@@ -30,6 +31,12 @@ public sealed class RdpBridgeClient : IDisposable
     public event Action? Disconnected;
     public event Action<RdpState>? StateChanged;
     public event Action<string>? ClipboardReceived;
+
+    /// <summary>
+    /// Fired when the local clipboard text changes (Windows only; never fired on other platforms).
+    /// Requires <see cref="StartLocalClipboardMonitor"/> to be called first.
+    /// </summary>
+    public event Action<string>? LocalClipboardChanged;
 
 
     public RdpBridgeClient(IRdpFrameReceiver? frameReceiver = null)
@@ -110,6 +117,29 @@ public sealed class RdpBridgeClient : IDisposable
     {
         if (_handle == IntPtr.Zero) return false;
         return NativeMethods.RdpBridge_clipboard_set_text(_handle, text) == 0;
+    }
+
+    /// <summary>
+    /// Start monitoring local clipboard changes. On Windows this uses
+    /// AddClipboardFormatListener (event-driven). On other platforms this is
+    /// a no-op and <see cref="LocalClipboardChanged"/> is never fired.
+    /// </summary>
+    public bool StartLocalClipboardMonitor()
+    {
+        if (_handle == IntPtr.Zero) return false;
+        _localClipboardCallback = OnLocalClipboard;
+        return NativeMethods.RdpBridge_start_local_clipboard_monitor(
+            _handle, _localClipboardCallback, IntPtr.Zero) == 0;
+    }
+
+    /// <summary>
+    /// Stop local clipboard monitoring.
+    /// </summary>
+    public void StopLocalClipboardMonitor()
+    {
+        if (_handle == IntPtr.Zero) return;
+        NativeMethods.RdpBridge_stop_local_clipboard_monitor(_handle);
+        _localClipboardCallback = null;
     }
 
     /// <summary>
@@ -257,6 +287,13 @@ public sealed class RdpBridgeClient : IDisposable
             ClipboardReceived?.Invoke(value);
     }
 
+    private void OnLocalClipboard(IntPtr userData, IntPtr text)
+    {
+        var value = text == IntPtr.Zero ? string.Empty : Marshal.PtrToStringUTF8(text) ?? string.Empty;
+        if (!string.IsNullOrEmpty(value))
+            LocalClipboardChanged?.Invoke(value);
+    }
+
     private void DebugLog(string message)
     {
         try
@@ -296,6 +333,9 @@ public sealed class RdpBridgeClient : IDisposable
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void ClipboardCallback(IntPtr userData, IntPtr utf8Text);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void LocalClipboardCallback(IntPtr userData, IntPtr utf8Text);
 
     private static class NativeMethods
     {
@@ -361,6 +401,15 @@ public sealed class RdpBridgeClient : IDisposable
         public static extern int RdpBridge_clipboard_set_text(
             IntPtr handle,
             [MarshalAs(UnmanagedType.LPUTF8Str)] string utf8Text);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int RdpBridge_start_local_clipboard_monitor(
+            IntPtr handle,
+            LocalClipboardCallback callback,
+            IntPtr userData);
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void RdpBridge_stop_local_clipboard_monitor(IntPtr handle);
 
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int RdpBridge_resize(IntPtr handle, int width, int height);

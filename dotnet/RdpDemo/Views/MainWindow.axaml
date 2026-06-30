@@ -1,0 +1,55 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:RdpDemo.ViewModels"
+        xmlns:views="using:RdpDemo.Views"
+        x:Class="RdpDemo.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Title="RdpBridge Demo"
+        Width="1280"
+        Height="860"
+        MinWidth="640"
+        MinHeight="480"
+        WindowStartupLocation="CenterScreen">
+
+    <Grid RowDefinitions="Auto,*">
+        <!-- Connection bar -->
+        <Border Grid.Row="0"
+                Padding="8,6"
+                Background="#F5F5F5"
+                BorderBrush="#E0E0E0"
+                BorderThickness="0,0,0,1">
+            <WrapPanel Orientation="Horizontal" VerticalAlignment="Center">
+                <TextBlock Text="Host:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                <TextBox Text="{Binding Host}" Width="140" Margin="0,0,8,0"/>
+
+                <TextBlock Text="Port:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                <TextBox Text="{Binding Port}" Width="56" Margin="0,0,8,0"/>
+
+                <TextBlock Text="User:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                <TextBox Text="{Binding Username}" Width="100" Margin="0,0,8,0"/>
+
+                <TextBlock Text="Password:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                <TextBox Text="{Binding Password}"
+                         PasswordChar="●"
+                         Width="100"
+                         Margin="0,0,8,0"/>
+
+                <TextBlock Text="W:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                <TextBox Text="{Binding DesktopWidth}" Width="52" Margin="0,0,4,0"/>
+                <TextBlock Text="H:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                <TextBox Text="{Binding DesktopHeight}" Width="52" Margin="0,0,8,0"/>
+
+                <Button Content="Connect"
+                        Command="{Binding ConnectCommand}"
+                        IsEnabled="{Binding !IsConnected}"
+                        Margin="0,0,4,0"/>
+                <Button Content="Disconnect"
+                        Command="{Binding DisconnectCommand}"
+                        IsEnabled="{Binding IsConnected}"/>
+            </WrapPanel>
+        </Border>
+
+        <!-- RDP view -->
+        <views:RdpView Grid.Row="1" DataContext="{Binding}"/>
+    </Grid>
+</Window>

@@ -16,6 +16,7 @@
 #else
 #include <dlfcn.h>
 #include <iconv.h>
+#include <sys/select.h>
 #endif
 
 #include <openssl/provider.h>
@@ -79,6 +80,14 @@ struct RdpSession
     void* user_data = nullptr;
     void* state_user_data = nullptr;
     void* clipboard_user_data = nullptr;
+
+    // Local clipboard monitor (Windows only; null/zero on other platforms)
+    RdpBridge_LocalClipboardCallback local_clipboard_callback = nullptr;
+    void* local_clipboard_user_data = nullptr;
+#if defined(_WIN32)
+    HWND   clipboard_hwnd   = nullptr;
+    HANDLE clipboard_thread = nullptr;
+#endif
 
     CliprdrClientContext* cliprdr = nullptr;
     std::string pending_local_text;
@@ -1045,9 +1054,51 @@ void connection_thread(RdpSession* session)
         return;
     }
 
+    // Event loop: block on OS handles until data arrives, then dispatch.
+    // freerdp_check_fds() is a legacy busy-poll API — avoid it here.
     while (session->running)
     {
-        if (freerdp_check_fds(session->instance) != TRUE)
+        HANDLE handles[64];
+        DWORD  count = freerdp_get_event_handles(session->instance->context,
+                                                  handles, ARRAYSIZE(handles));
+        if (count == 0)
+        {
+            set_error(session, "freerdp_get_event_handles failed.");
+            break;
+        }
+
+#if defined(_WIN32)
+        const DWORD waitResult = WaitForMultipleObjects(count, handles, FALSE, 100);
+        if (waitResult == WAIT_FAILED)
+        {
+            set_error(session, "WaitForMultipleObjects failed.");
+            break;
+        }
+#else
+        // On POSIX, freerdp_get_event_handles returns file descriptors cast to
+        // HANDLE (void*). Build an fd_set and call select() with a short timeout
+        // so we also respect session->running without busy-waiting.
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        int maxfd = -1;
+        for (DWORD i = 0; i < count; ++i)
+        {
+            int fd = static_cast<int>(reinterpret_cast<intptr_t>(handles[i]));
+            if (fd >= 0 && fd < FD_SETSIZE)
+            {
+                FD_SET(fd, &rfds);
+                if (fd > maxfd) maxfd = fd;
+            }
+        }
+        struct timeval tv{ 0, 100'000 }; // 100 ms
+        if (maxfd >= 0)
+            select(maxfd + 1, &rfds, nullptr, nullptr, &tv);
+#endif
+
+        if (!session->running)
+            break;
+
+        if (freerdp_check_event_handles(session->instance->context) != TRUE)
         {
             set_error(session, "FreeRDP transport closed.");
             break;
@@ -1058,6 +1109,166 @@ void connection_thread(RdpSession* session)
     free_instance(session);
     session->running = false;
 }
+
+// ---------------------------------------------------------------------------
+// Local clipboard monitor (Windows only)
+// ---------------------------------------------------------------------------
+
+#if defined(_WIN32)
+
+static constexpr UINT WM_RDPBRIDGE_STOP = WM_USER + 1;
+static constexpr wchar_t CLIPBOARD_WNDCLASS[] = L"RdpBridgeClipboardMonitor";
+
+// Retrieve CF_UNICODETEXT from the clipboard and convert to UTF-8.
+static std::string get_clipboard_text_utf8()
+{
+    if (!IsClipboardFormatAvailable(CF_UNICODETEXT))
+        return {};
+
+    if (!OpenClipboard(nullptr))
+        return {};
+
+    std::string result;
+    HANDLE hData = GetClipboardData(CF_UNICODETEXT);
+    if (hData)
+    {
+        auto* wstr = static_cast<const wchar_t*>(GlobalLock(hData));
+        if (wstr)
+        {
+            int len = WideCharToMultiByte(
+                CP_UTF8, 0, wstr, -1, nullptr, 0, nullptr, nullptr);
+            if (len > 1) // len includes null terminator
+            {
+                result.resize(static_cast<size_t>(len - 1));
+                WideCharToMultiByte(
+                    CP_UTF8, 0, wstr, -1,
+                    result.data(), len, nullptr, nullptr);
+            }
+            GlobalUnlock(hData);
+        }
+    }
+    CloseClipboard();
+    return result;
+}
+
+static LRESULT CALLBACK clipboard_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_CREATE)
+    {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lp);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA,
+            reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
+        AddClipboardFormatListener(hwnd);
+        return 0;
+    }
+
+    if (msg == WM_DESTROY)
+    {
+        RemoveClipboardFormatListener(hwnd);
+        PostQuitMessage(0);
+        return 0;
+    }
+
+    if (msg == WM_RDPBRIDGE_STOP)
+    {
+        DestroyWindow(hwnd);
+        return 0;
+    }
+
+    if (msg == WM_CLIPBOARDUPDATE)
+    {
+        auto* session = reinterpret_cast<RdpSession*>(
+            GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (session)
+        {
+            const std::string text = get_clipboard_text_utf8();
+            if (!text.empty())
+            {
+                RdpBridge_LocalClipboardCallback cb  = nullptr;
+                void*                            ud  = nullptr;
+                {
+                    std::lock_guard<std::mutex> lock(session->callback_mutex);
+                    cb = session->local_clipboard_callback;
+                    ud = session->local_clipboard_user_data;
+                }
+                if (cb)
+                    cb(ud, text.c_str());
+            }
+        }
+        return 0;
+    }
+
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static DWORD WINAPI clipboard_monitor_thread(LPVOID param)
+{
+    auto* session = static_cast<RdpSession*>(param);
+
+    // Register window class (idempotent — fails silently if already registered)
+    WNDCLASSEXW wc{};
+    wc.cbSize        = sizeof(wc);
+    wc.lpfnWndProc   = clipboard_wnd_proc;
+    wc.hInstance     = GetModuleHandleW(nullptr);
+    wc.lpszClassName = CLIPBOARD_WNDCLASS;
+    RegisterClassExW(&wc);
+
+    HWND hwnd = CreateWindowExW(
+        0, CLIPBOARD_WNDCLASS, nullptr, 0,
+        0, 0, 0, 0,
+        HWND_MESSAGE, nullptr,
+        GetModuleHandleW(nullptr),
+        session);   // passed to WM_CREATE via CREATESTRUCT::lpCreateParams
+
+    if (!hwnd)
+        return 1;
+
+    // Publish HWND so stop() can post WM_RDPBRIDGE_STOP
+    {
+        std::lock_guard<std::mutex> lock(session->callback_mutex);
+        session->clipboard_hwnd = hwnd;
+    }
+
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0)
+    {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(session->callback_mutex);
+        session->clipboard_hwnd = nullptr;
+    }
+
+    return 0;
+}
+
+static void stop_local_clipboard_monitor_impl(RdpSession* session)
+{
+    HWND   hwnd   = nullptr;
+    HANDLE thread = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(session->callback_mutex);
+        hwnd   = session->clipboard_hwnd;
+        thread = session->clipboard_thread;
+        session->clipboard_hwnd   = nullptr;
+        session->clipboard_thread = nullptr;
+        session->local_clipboard_callback  = nullptr;
+        session->local_clipboard_user_data = nullptr;
+    }
+
+    if (hwnd)
+        PostMessageW(hwnd, WM_RDPBRIDGE_STOP, 0, 0);
+
+    if (thread)
+    {
+        WaitForSingleObject(thread, 3000);
+        CloseHandle(thread);
+    }
+}
+
+#endif // _WIN32
 
 } // anonymous namespace
 
@@ -1079,6 +1290,7 @@ RDP_BRIDGE_API void RdpBridge_destroy(void* handle)
     if (!session)
         return;
 
+    RdpBridge_stop_local_clipboard_monitor(handle);
     RdpBridge_disconnect(handle);
     free_instance(session);
     delete session;
@@ -1339,6 +1551,62 @@ RDP_BRIDGE_API int RdpBridge_resize(
 
     disp->SendMonitorLayout(disp, 1, &monitor);
     return 0;
+}
+
+RDP_BRIDGE_API int RdpBridge_start_local_clipboard_monitor(
+    void* handle,
+    RdpBridge_LocalClipboardCallback callback,
+    void* user_data)
+{
+    auto* session = static_cast<RdpSession*>(handle);
+    if (!session)
+        return -1;
+
+#if defined(_WIN32)
+    // Stop any existing monitor first.
+    stop_local_clipboard_monitor_impl(session);
+
+    if (!callback)
+        return 0;
+
+    {
+        std::lock_guard<std::mutex> lock(session->callback_mutex);
+        session->local_clipboard_callback  = callback;
+        session->local_clipboard_user_data = user_data;
+    }
+
+    HANDLE thread = CreateThread(
+        nullptr, 0, clipboard_monitor_thread, session, 0, nullptr);
+    if (!thread)
+    {
+        std::lock_guard<std::mutex> lock(session->callback_mutex);
+        session->local_clipboard_callback  = nullptr;
+        session->local_clipboard_user_data = nullptr;
+        return -1;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(session->callback_mutex);
+        session->clipboard_thread = thread;
+    }
+    return 0;
+#else
+    // Not implemented on this platform — silent no-op.
+    (void)callback;
+    (void)user_data;
+    return 0;
+#endif
+}
+
+RDP_BRIDGE_API void RdpBridge_stop_local_clipboard_monitor(void* handle)
+{
+    auto* session = static_cast<RdpSession*>(handle);
+    if (!session)
+        return;
+
+#if defined(_WIN32)
+    stop_local_clipboard_monitor_impl(session);
+#endif
 }
 
 } // extern "C"
