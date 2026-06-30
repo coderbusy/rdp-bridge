@@ -24,6 +24,7 @@ find_package(WinPR REQUIRED CONFIG)
 find_package(OpenSSL REQUIRED)
 
 find_path(FREERDP_INCLUDE_DIR NAMES freerdp/freerdp.h PATH_SUFFIXES freerdp3)
+find_path(WINPR_INCLUDE_DIR   NAMES winpr/stream.h   PATH_SUFFIXES winpr3)
 
 # Select static vs shared FreeRDP/WinPR link targets.
 if(FREERDP_STATIC)
@@ -48,6 +49,7 @@ target_include_directories(RdpBridge
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${FREERDP_INCLUDE_DIR}
+        ${WINPR_INCLUDE_DIR}
 )
 
 if(UNIX AND NOT APPLE AND FREERDP_STATIC)
